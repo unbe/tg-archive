@@ -112,8 +112,10 @@ class Sync:
         deleted_count = 0
         edited_count = 0
 
-        for i in range(0, len(all_ids), batch_size):
+        total_active = len(all_ids)
+        for i in range(0, total_active, batch_size):
             chunk = all_ids[i:i + batch_size]
+            remaining = total_active - (i + len(chunk))
             try:
                 messages = self.client.get_messages(group_id, ids=chunk)
             except errors.FloodWaitError as e:
@@ -141,8 +143,8 @@ class Sync:
                     deleted_count += len(chunk_deleted)
                 self.db.commit()
                 edited_count += chunk_edited
-                logging.info("batch update: flagged {} deletion(s), recorded {} edit(s)".format(
-                    len(chunk_deleted), chunk_edited))
+                logging.info("batch update: flagged {} deletion(s), recorded {} edit(s) ({} remaining to scan)".format(
+                    len(chunk_deleted), chunk_edited, remaining))
 
             time.sleep(self.config["fetch_wait"])
 
