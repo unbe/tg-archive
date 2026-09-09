@@ -160,7 +160,7 @@ class Sync:
         logging.info("listening for live Telegram events on group {}".format(group_id))
 
         @self.client.on(events.MessageDeleted(chats=group_id))
-        def on_message_deleted(event):
+        async def on_message_deleted(event):
             deleted_ids = getattr(event, "deleted_ids", None)
             if not deleted_ids:
                 single_id = getattr(event, "deleted_id", None)
@@ -172,7 +172,7 @@ class Sync:
                     len(deleted_ids), deleted_ids))
 
         @self.client.on(events.NewMessage(chats=group_id))
-        def on_new_message(event):
+        async def on_new_message(event):
             m = self._process_telethon_message(event.message)
             if m:
                 self.db.insert_user(m.user)
@@ -183,7 +183,7 @@ class Sync:
                 logging.info("live: inserted message #{}".format(m.id))
 
         @self.client.on(events.MessageEdited(chats=group_id))
-        def on_message_edited(event):
+        async def on_message_edited(event):
             m = self._process_telethon_message(event.message)
             if m:
                 self.db.insert_user(m.user)

@@ -168,15 +168,42 @@ class TestSync(unittest.TestCase):
         self.assertIn(telethon.events.MessageDeleted, handlers)
 
         # Trigger on_message_deleted with deleted_ids = [50, 52]
+        import asyncio
         del_handler = handlers[telethon.events.MessageDeleted]
         event = MagicMock()
         event.deleted_ids = [50, 52]
-        del_handler(event)
+        if asyncio.iscoroutinefunction(del_handler):
+            asyncio.run(del_handler(event))
+        else:
+            del_handler(event)
 
         msgs = {m.id: m for m in self.db.get_messages(2025, 1)}
         self.assertTrue(msgs[50].deleted)
         self.assertFalse(msgs[51].deleted)
         self.assertTrue(msgs[52].deleted)
+
+        # Trigger on_new_message
+        new_handler = handlers[telethon.events.NewMessage]
+        event_new = MagicMock()
+        event_new.message = DummyTelethonMessage(60, "Live new message")
+        asyncio.run(new_handler(event_new))
+
+        msgs = {m.id: m for m in self.db.get_messages(2025, 1)}
+        self.assertIn(60, msgs)
+        self.assertEqual(msgs[60].content, "Live new message")
+
+        # Trigger on_message_edited
+        edit_handler = handlers[telethon.events.MessageEdited]
+        event_edit = MagicMock()
+        event_edit.message = DummyTelethonMessage(60, "Live edited message")
+        event_edit.message.edit_date = pytz.utc.localize(datetime(2025, 1, 15, 14, 0, 0))
+        asyncio.run(edit_handler(event_edit))
+
+        msgs = {m.id: m for m in self.db.get_messages(2025, 1)}
+        self.assertEqual(msgs[60].content, "Live edited message")
+        edits = self.db.get_message_edits(60)
+        self.assertEqual(len(edits), 1)
+        self.assertEqual(edits[0].content, "Live new message")
 
 
 if __name__ == "__main__":
