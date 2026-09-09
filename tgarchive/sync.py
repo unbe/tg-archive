@@ -130,6 +130,8 @@ class Sync:
                 elif getattr(m, "edit_date", None):
                     parsed = self._process_telethon_message(m, download_avatars=False)
                     if parsed:
+                        if parsed.media:
+                            self.db.insert_media(parsed.media)
                         if self.db.insert_message(parsed):
                             chunk_edited += 1
 
@@ -418,23 +420,67 @@ class Sync:
                 isinstance(msg.media, telethon.tl.types.MessageMediaDocument) or \
                 isinstance(msg.media, telethon.tl.types.MessageMediaContact):
             if self.config["download_media"]:
-                # Filter by extensions?
-                if len(self.config["media_mime_types"]) > 0:
+                media_mime_types = self.config.get("media_mime_types", [])
+                if len(media_mime_types) > 0:
                     if hasattr(msg, "file") and hasattr(msg.file, "mime_type") and msg.file.mime_type:
-                        if msg.file.mime_type not in self.config["media_mime_types"]:
+                        if msg.file.mime_type not in media_mime_types:
                             logging.info(
                                 "skipping media #{} / {}".format(msg.file.name, msg.file.mime_type))
                             return
 
+                telegram_id = None
+                if isinstance(msg.media, telethon.tl.types.MessageMediaPhoto) and hasattr(msg.media, "photo"):
+                    telegram_id = getattr(msg.media.photo, "id", None)
+                elif isinstance(msg.media, telethon.tl.types.MessageMediaDocument) and hasattr(msg.media, "document"):
+                    telegram_id = getattr(msg.media.document, "id", None)
+
+                existing = self.db.get_media(msg.id)
+                if existing and existing.url:
+                    fpath = os.path.join(self.config["media_dir"], existing.url)
+                    if os.path.exists(fpath):
+                        is_same = False
+                        if telegram_id is not None and existing.description == str(telegram_id):
+                            is_same = True
+                        elif existing.description is None:
+                            # Legacy record without stored telegram_id: verify by size
+                            if isinstance(msg.media, telethon.tl.types.MessageMediaDocument) and hasattr(msg.media, "document"):
+                                doc_size = getattr(msg.media.document, "size", None)
+                                if doc_size is not None and doc_size == os.path.getsize(fpath):
+                                    is_same = True
+                            elif isinstance(msg.media, telethon.tl.types.MessageMediaPhoto):
+                                if os.path.getsize(fpath) > 0:
+                                    is_same = True
+
+                        if is_same:
+                            if telegram_id is not None and existing.description != str(telegram_id):
+                                updated = Media(
+                                    id=existing.id,
+                                    type=existing.type,
+                                    url=existing.url,
+                                    title=existing.title,
+                                    description=str(telegram_id),
+                                    thumb=existing.thumb
+                                )
+                                self.db.insert_media(updated)
+                                return updated
+                            return existing
+
                 logging.info("downloading media #{}".format(msg.id))
                 try:
                     basename, fname, thumb = self._download_media(msg)
+                    if existing and existing.url and existing.url != fname:
+                        old_fpath = os.path.join(self.config["media_dir"], existing.url)
+                        if os.path.exists(old_fpath):
+                            try:
+                                os.remove(old_fpath)
+                            except OSError:
+                                pass
                     return Media(
                         id=msg.id,
                         type="photo",
                         url=fname,
                         title=basename,
-                        description=None,
+                        description=str(telegram_id) if telegram_id is not None else None,
                         thumb=thumb
                     )
                 except Exception as e:

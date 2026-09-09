@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytz
 
 import telethon.tl.types
-from tgarchive.db import DB, User, Message
+from tgarchive.db import DB, User, Message, Media
 from tgarchive.sync import Sync
 
 
@@ -236,7 +236,79 @@ class TestSync(unittest.TestCase):
         msgs = {m.id: m for m in self.db.get_messages(2025, 1)}
         self.assertEqual(msgs[201].content, "Edited text")
 
+    @patch("tgarchive.sync.Sync.new_client")
+    def test_check_updates_media_caching_and_replacement(self, mock_new_client):
+        mock_client = MagicMock()
+        mock_new_client.return_value = mock_client
+        mock_client.get_dialogs.return_value = []
+        mock_client.get_entity.return_value = DummyEntity(100)
+
+        config = dict(self.config)
+        config["download_media"] = True
+        os.makedirs(self.media_dir, exist_ok=True)
+
+        date = pytz.utc.localize(datetime(2025, 1, 15, 12, 0, 0))
+        u = User(id=1, username="user1", first_name="First", last_name="Last", tags=[], avatar=None)
+        self.db.insert_user(u)
+
+        # Message 300 has existing media
+        med_file = os.path.join(self.media_dir, "300.jpg")
+        with open(med_file, "wb") as f:
+            f.write(b"original image content")
+
+        med = Media(id=300, type="photo", url="300.jpg", title="photo.jpg", description="999001", thumb=None)
+        self.db.insert_media(med)
+        self.db.insert_message(Message(id=300, type="message", date=date, edit_date=None, content="Original caption", reply_to=None, user=u, media=med, deleted=False))
+        self.db.commit()
+
+        # Case 1: Caption edited, media is SAME photo (photo.id == 999001)
+        msg300 = DummyTelethonMessage(300, "Updated caption")
+        msg300.edit_date = pytz.utc.localize(datetime(2025, 1, 15, 13, 0, 0))
+        photo_mock = MagicMock()
+        photo_mock.id = 999001
+        msg300.media = telethon.tl.types.MessageMediaPhoto(photo=photo_mock)
+
+        mock_client.get_messages.return_value = [msg300]
+        s = Sync(config, "session.session", self.db)
+        s.check_updates()
+
+        # download_media should NOT be called because media is unchanged
+        mock_client.download_media.assert_not_called()
+        msgs = {m.id: m for m in self.db.get_messages(2025, 1)}
+        self.assertEqual(msgs[300].content, "Updated caption")
+
+        # Case 2: Media REPLACED with a new photo (photo.id == 999002)
+        msg300_replaced = DummyTelethonMessage(300, "Caption with replaced photo")
+        msg300_replaced.edit_date = pytz.utc.localize(datetime(2025, 1, 15, 14, 0, 0))
+        photo_mock2 = MagicMock()
+        photo_mock2.id = 999002
+        msg300_replaced.media = telethon.tl.types.MessageMediaPhoto(photo=photo_mock2)
+
+        # Mock download_media returning new temp file each time
+        dl_counter = [0]
+        def fake_download_media(m, file=None, thumb=None):
+            dl_counter[0] += 1
+            path = os.path.join(self.tmp_dir.name, f"downloaded_{dl_counter[0]}.jpg")
+            with open(path, "wb") as f:
+                f.write(b"new replaced image content")
+            return path
+        mock_client.download_media.side_effect = fake_download_media
+
+        mock_client.get_messages.return_value = [msg300_replaced]
+        s.check_updates()
+
+        # download_media MUST be called because photo ID changed
+        mock_client.download_media.assert_called()
+
+        # Media record in DB should be updated with new telegram ID
+        updated_med = self.db.get_media(300)
+        self.assertEqual(updated_med.description, "999002")
+
+        with open(med_file, "rb") as f:
+            self.assertEqual(f.read(), b"new replaced image content")
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

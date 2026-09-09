@@ -5,7 +5,7 @@ import sqlite3
 from collections import namedtuple
 from datetime import datetime, timedelta, timezone
 import pytz
-from typing import Iterator
+from typing import Iterator, Optional
 
 schema = """
 CREATE table messages (
@@ -223,6 +223,15 @@ class DB:
                 avatar=COALESCE(excluded.avatar, users.avatar)
             """, (u.id, u.username, u.first_name, u.last_name, " ".join(u.tags), u.avatar))
 
+    def get_media(self, id: int) -> Optional[Media]:
+        """Fetch media record by message id."""
+        cur = self.conn.cursor()
+        cur.execute("SELECT id, type, url, title, description, thumb FROM media WHERE id = ?", (id,))
+        row = cur.fetchone()
+        if row:
+            return Media(*row)
+        return None
+
     def insert_media(self, m: Media):
         cur = self.conn.cursor()
         cur.execute("""INSERT OR REPLACE INTO media
@@ -264,8 +273,8 @@ class DB:
                 edit_date=excluded.edit_date,
                 content=excluded.content,
                 reply_to=excluded.reply_to,
-                user_id=excluded.user_id,
-                media_id=excluded.media_id,
+                user_id=COALESCE(excluded.user_id, messages.user_id),
+                media_id=COALESCE(excluded.media_id, messages.media_id),
                 deleted=excluded.deleted
             """,
                     (m.id,
