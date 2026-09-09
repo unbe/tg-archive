@@ -137,14 +137,16 @@ class Sync:
                         if self.db.insert_message(parsed):
                             chunk_edited += 1
 
-            if chunk_deleted or chunk_edited > 0:
-                if chunk_deleted:
-                    self.db.flag_deleted_batch(chunk_deleted)
-                    deleted_count += len(chunk_deleted)
+            if chunk_deleted:
+                self.db.flag_deleted_batch(chunk_deleted)
+                deleted_count += len(chunk_deleted)
                 self.db.commit()
-                edited_count += chunk_edited
-                logging.info("batch update: flagged {} deletion(s), recorded {} edit(s) ({} remaining to scan)".format(
-                    len(chunk_deleted), chunk_edited, remaining))
+            elif chunk_edited > 0:
+                self.db.commit()
+            edited_count += chunk_edited
+
+            logging.info("batch update: flagged {} deletion(s), recorded {} edit(s) ({} remaining to scan)".format(
+                len(chunk_deleted), chunk_edited, remaining))
 
             time.sleep(self.config["fetch_wait"])
 
