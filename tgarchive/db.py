@@ -235,10 +235,12 @@ class DB:
                      m.thumb)
                     )
 
-    def insert_message(self, m: Message):
+    def insert_message(self, m: Message) -> bool:
+        """Insert or update a message. Returns True if an edit revision was recorded."""
         deleted = getattr(m, "deleted", False)
         cur = self.conn.cursor()
 
+        was_edited = False
         # If message exists and content has changed, record old version in message_edits
         cur.execute("SELECT content, edit_date, date FROM messages WHERE id = ?", (m.id,))
         row = cur.fetchone()
@@ -250,6 +252,7 @@ class DB:
                     INSERT INTO message_edits (message_id, date, content)
                     VALUES (?, ?, ?)
                 """, (m.id, rev_date.strftime("%Y-%m-%d %H:%M:%S") if hasattr(rev_date, "strftime") else str(rev_date) if rev_date else None, old_content))
+                was_edited = True
 
         cur.execute("""INSERT INTO messages
             (id, type, date, edit_date, content, reply_to, user_id, media_id, deleted)
@@ -275,6 +278,7 @@ class DB:
                      m.media.id if m.media else None,
                      1 if deleted else 0)
                     )
+        return was_edited
 
     def get_message_edits(self, message_id: int) -> list:
         """Get edit revisions for a specific message ID in chronological order."""

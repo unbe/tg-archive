@@ -94,21 +94,22 @@ class Sync:
         logging.info(
             "finished. fetched {} messages. last message = {}".format(n, last_date))
 
-    def check_deleted(self, from_id=None, recent_days=None):
+    def check_updates(self, from_id=None, recent_days=None):
         """
         Check non-deleted messages in the database against Telegram,
-        flagging any messages that no longer exist as deleted.
+        flagging any deleted messages and recording edits for modified messages.
         """
         group_id = self._get_group_id(self.config["group"])
         all_ids = self.db.get_active_message_ids(since_id=from_id, recent_days=recent_days)
         if not all_ids:
-            logging.info("no active messages in DB to check for deletion")
+            logging.info("no active messages in DB to check for updates")
             return
 
-        logging.info("checking {} active messages in DB for deletions".format(len(all_ids)))
+        logging.info("checking {} active messages in DB for updates".format(len(all_ids)))
 
         batch_size = min(self.config.get("fetch_batch_size", 200), 200)
         deleted_count = 0
+        edited_count = 0
 
         for i in range(0, len(all_ids), batch_size):
             chunk = all_ids[i:i + batch_size]
@@ -121,23 +122,34 @@ class Sync:
 
             msg_list = messages if isinstance(messages, (list, tuple)) else [messages]
             chunk_deleted = []
+            chunk_edited = 0
             for mid, m in zip(chunk, msg_list):
                 if not m or isinstance(m, telethon.tl.types.MessageEmpty):
                     chunk_deleted.append(mid)
+                elif getattr(m, "edit_date", None):
+                    parsed = self._process_telethon_message(m)
+                    if parsed:
+                        if self.db.insert_message(parsed):
+                            chunk_edited += 1
 
-            if chunk_deleted:
-                self.db.flag_deleted_batch(chunk_deleted)
+            if chunk_deleted or chunk_edited > 0:
+                if chunk_deleted:
+                    self.db.flag_deleted_batch(chunk_deleted)
+                    deleted_count += len(chunk_deleted)
                 self.db.commit()
-                deleted_count += len(chunk_deleted)
-                logging.info("flagged {} deleted message(s) in this batch (total: {})".format(
-                    len(chunk_deleted), deleted_count))
+                edited_count += chunk_edited
+                logging.info("batch update: flagged {} deletion(s), recorded {} edit(s)".format(
+                    len(chunk_deleted), chunk_edited))
 
             time.sleep(self.config["fetch_wait"])
 
         self.db.commit()
         if self.config.get("use_takeout", False):
             self.finish_takeout()
-        logging.info("finished deletion check. Flagged {} deleted messages".format(deleted_count))
+        logging.info("finished checking updates. Flagged {} deleted messages, recorded {} edited messages".format(
+            deleted_count, edited_count))
+
+    check_deleted = check_updates
 
     def listen(self):
         """

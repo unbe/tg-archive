@@ -94,7 +94,7 @@ class TestSync(unittest.TestCase):
         self.assertFalse(msgs[12].deleted)
 
     @patch("tgarchive.sync.Sync.new_client")
-    def test_check_deleted(self, mock_new_client):
+    def test_check_updates(self, mock_new_client):
         mock_client = MagicMock()
         mock_new_client.return_value = mock_client
 
@@ -106,21 +106,32 @@ class TestSync(unittest.TestCase):
             self.db.insert_message(Message(id=mid, type="message", date=date, edit_date=None, content=f"Msg {mid}", reply_to=None, user=u, media=None, deleted=False))
         self.db.commit()
 
-        # Mock get_messages to return message 101, None for 102, and MessageEmpty for 103
+        # Mock get_messages:
+        # 101 is edited with new text and edit_date
+        # 102 is None (deleted)
+        # 103 is MessageEmpty (deleted)
         mock_client.get_dialogs.return_value = []
         mock_client.get_entity.return_value = DummyEntity(100)
 
-        msg101 = DummyTelethonMessage(101, "Msg 101")
+        edit_date = pytz.utc.localize(datetime(2025, 1, 15, 13, 0, 0))
+        msg101 = DummyTelethonMessage(101, "Updated text 101")
+        msg101.edit_date = edit_date
         msg_empty = telethon.tl.types.MessageEmpty(id=103, peer_id=telethon.tl.types.PeerChannel(channel_id=100))
         mock_client.get_messages.return_value = [msg101, None, msg_empty]
 
         s = Sync(self.config, "session.session", self.db)
-        s.check_deleted()
+        s.check_updates()
 
         msgs = {m.id: m for m in self.db.get_messages(2025, 1)}
         self.assertFalse(msgs[101].deleted)
+        self.assertEqual(msgs[101].content, "Updated text 101")
         self.assertTrue(msgs[102].deleted)
         self.assertTrue(msgs[103].deleted)
+
+        # Check that previous version of 101 was archived in message_edits
+        edits = self.db.get_message_edits(101)
+        self.assertEqual(len(edits), 1)
+        self.assertEqual(edits[0].content, "Msg 101")
 
     @patch("tgarchive.sync.Sync.new_client")
     def test_listen_message_deleted_event(self, mock_new_client):

@@ -79,10 +79,10 @@ def main():
                    dest="id", help="sync (or update) messages for given ids")
     s.add_argument("-from-id", "--from-id", action="store", type=int,
                    dest="from_id", help="sync (or update) messages from this id to the latest")
-    s.add_argument("--check-deleted", action="store_true", dest="check_deleted",
-                   help="check archived messages in the DB against Telegram to flag any that have been deleted")
+    s.add_argument("--check-updates", "--check-deleted", action="store_true", dest="check_updates",
+                   help="check archived messages in the DB against Telegram to flag deletions and record edits")
     s.add_argument("--recent-days", action="store", type=int, default=None,
-                   dest="recent_days", help="limit deletion check to messages from the last N days")
+                   dest="recent_days", help="limit update/deletion check to messages from the last N days")
     s.add_argument("--listen", action="store_true", dest="listen",
                    help="listen for live events (new messages, edits, and deletions) in real time")
 
@@ -129,7 +129,7 @@ def main():
                 os.chmod(os.path.join(root, f), 0o644)
 
     # Sync from Telegram.
-    elif args.sync or args.check_deleted or args.listen:
+    elif args.sync or args.check_updates or args.listen:
         # Import because the Telegram client import is quite heavy.
         from .sync import Sync
         # patch for python 3.14
@@ -151,14 +151,14 @@ def main():
 
         try:
             s = Sync(cfg, args.session, DB(args.data))
-            if args.sync or (not args.check_deleted and not args.listen):
+            if args.sync or (not args.check_updates and not args.listen):
                 logging.info("starting Telegram sync (batch_size={}, limit={}, wait={}, mode={})".format(
                     cfg["fetch_batch_size"], cfg["fetch_limit"], cfg["fetch_wait"], mode
                 ))
                 s.sync(args.id, args.from_id)
 
-            if args.check_deleted:
-                s.check_deleted(args.from_id, recent_days=args.recent_days)
+            if args.check_updates:
+                s.check_updates(args.from_id, recent_days=args.recent_days)
 
             if args.listen:
                 s.listen()
