@@ -79,6 +79,10 @@ def main():
                    dest="id", help="sync (or update) messages for given ids")
     s.add_argument("-from-id", "--from-id", action="store", type=int,
                    dest="from_id", help="sync (or update) messages from this id to the latest")
+    s.add_argument("--check-deleted", action="store_true", dest="check_deleted",
+                   help="check archived messages in the DB against Telegram to flag any that have been deleted")
+    s.add_argument("--listen", action="store_true", dest="listen",
+                   help="listen for live events (new messages, edits, and deletions) in real time")
 
     b = p.add_argument_group("build")
     b.add_argument("-b", "--build", action="store_true",
@@ -123,7 +127,7 @@ def main():
                 os.chmod(os.path.join(root, f), 0o644)
 
     # Sync from Telegram.
-    elif args.sync:
+    elif args.sync or args.check_deleted or args.listen:
         # Import because the Telegram client import is quite heavy.
         from .sync import Sync
         # patch for python 3.14
@@ -136,11 +140,7 @@ def main():
         cfg = get_config(args.config)
         mode = "takeout" if cfg.get("use_takeout", False) else "standard"
 
-        logging.info("starting Telegram sync (batch_size={}, limit={}, wait={}, mode={})".format(
-            cfg["fetch_batch_size"], cfg["fetch_limit"], cfg["fetch_wait"], mode
-        ))
-
-       # Added the following 5 lines for compatibility with Python 3.14
+        # Added the following 5 lines for compatibility with Python 3.14
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -149,7 +149,17 @@ def main():
 
         try:
             s = Sync(cfg, args.session, DB(args.data))
-            s.sync(args.id, args.from_id)
+            if args.sync or (not args.check_deleted and not args.listen):
+                logging.info("starting Telegram sync (batch_size={}, limit={}, wait={}, mode={})".format(
+                    cfg["fetch_batch_size"], cfg["fetch_limit"], cfg["fetch_wait"], mode
+                ))
+                s.sync(args.id, args.from_id)
+
+            if args.check_deleted:
+                s.check_deleted(args.from_id)
+
+            if args.listen:
+                s.listen()
         except KeyboardInterrupt as e:
             logging.info("sync cancelled manually")
             if cfg.get("use_takeout", False):

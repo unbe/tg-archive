@@ -8,7 +8,7 @@ import shutil
 import time
 
 from PIL import Image
-from telethon import TelegramClient, errors, sync
+from telethon import TelegramClient, errors, events, sync
 import telethon.tl.types
 
 from .db import User, Message, Media
@@ -75,12 +75,12 @@ class Sync:
                     logging.info("fetched {} messages".format(n))
                     self.db.commit()
 
-                if 0 < self.config["fetch_limit"] <= n or ids:
+                if 0 < self.config["fetch_limit"] <= n:
                     has = False
                     break
 
             self.db.commit()
-            if has:
+            if has and not ids:
                 last_id = m.id
                 logging.info("fetched {} messages. sleeping for {} seconds".format(
                     n, self.config["fetch_wait"]))
@@ -93,6 +93,95 @@ class Sync:
             self.finish_takeout()
         logging.info(
             "finished. fetched {} messages. last message = {}".format(n, last_date))
+
+    def check_deleted(self, from_id=None):
+        """
+        Check non-deleted messages in the database against Telegram,
+        flagging any messages that no longer exist as deleted.
+        """
+        group_id = self._get_group_id(self.config["group"])
+        all_ids = self.db.get_active_message_ids(since_id=from_id)
+        if not all_ids:
+            logging.info("no active messages in DB to check for deletion")
+            return
+
+        logging.info("checking {} active messages in DB for deletions".format(len(all_ids)))
+
+        batch_size = min(self.config.get("fetch_batch_size", 200), 200)
+        deleted_count = 0
+
+        for i in range(0, len(all_ids), batch_size):
+            chunk = all_ids[i:i + batch_size]
+            try:
+                messages = self.client.get_messages(group_id, ids=chunk)
+            except errors.FloodWaitError as e:
+                logging.info("flood waited: have to wait {} seconds".format(e.seconds))
+                time.sleep(e.seconds)
+                messages = self.client.get_messages(group_id, ids=chunk)
+
+            msg_list = messages if isinstance(messages, (list, tuple)) else [messages]
+            chunk_deleted = []
+            for mid, m in zip(chunk, msg_list):
+                if not m or isinstance(m, telethon.tl.types.MessageEmpty):
+                    chunk_deleted.append(mid)
+
+            if chunk_deleted:
+                self.db.flag_deleted_batch(chunk_deleted)
+                self.db.commit()
+                deleted_count += len(chunk_deleted)
+                logging.info("flagged {} deleted message(s) in this batch (total: {})".format(
+                    len(chunk_deleted), deleted_count))
+
+            time.sleep(self.config["fetch_wait"])
+
+        self.db.commit()
+        if self.config.get("use_takeout", False):
+            self.finish_takeout()
+        logging.info("finished deletion check. Flagged {} deleted messages".format(deleted_count))
+
+    def listen(self):
+        """
+        Listen for live Telegram events (MessageDeleted, NewMessage, MessageEdited)
+        and record them in real-time in the SQLite DB.
+        """
+        group_id = self._get_group_id(self.config["group"])
+        logging.info("listening for live Telegram events on group {}".format(group_id))
+
+        @self.client.on(events.MessageDeleted(chats=group_id))
+        def on_message_deleted(event):
+            deleted_ids = getattr(event, "deleted_ids", None)
+            if not deleted_ids:
+                single_id = getattr(event, "deleted_id", None)
+                deleted_ids = [single_id] if single_id else []
+            if deleted_ids:
+                self.db.flag_deleted_batch(deleted_ids)
+                self.db.commit()
+                logging.info("flagged {} deleted message(s) in DB: {}".format(
+                    len(deleted_ids), deleted_ids))
+
+        @self.client.on(events.NewMessage(chats=group_id))
+        def on_new_message(event):
+            m = self._process_telethon_message(event.message)
+            if m:
+                self.db.insert_user(m.user)
+                if m.media:
+                    self.db.insert_media(m.media)
+                self.db.insert_message(m)
+                self.db.commit()
+                logging.info("live: inserted message #{}".format(m.id))
+
+        @self.client.on(events.MessageEdited(chats=group_id))
+        def on_message_edited(event):
+            m = self._process_telethon_message(event.message)
+            if m:
+                self.db.insert_user(m.user)
+                if m.media:
+                    self.db.insert_media(m.media)
+                self.db.insert_message(m)
+                self.db.commit()
+                logging.info("live: updated edited message #{}".format(m.id))
+
+        self.client.run_until_disconnected()
 
     def new_client(self, session, config):
         if "proxy" in config and config["proxy"].get("enable"):
@@ -144,47 +233,68 @@ class Sync:
     def _get_messages(self, group, offset_id, ids=None) -> Message:
         messages = self._fetch_messages(group, offset_id, ids)
         # https://docs.telethon.dev/en/latest/quick-references/objects-reference.html#message
+        if ids:
+            id_list = ids if isinstance(ids, (list, tuple)) else [ids]
+            msg_list = messages if isinstance(messages, (list, tuple)) else [messages]
+            for mid, m in zip(id_list, msg_list):
+                if not m or isinstance(m, telethon.tl.types.MessageEmpty):
+                    self.db.flag_deleted(mid)
+                    logging.info("message #{} was deleted on Telegram, flagged in DB".format(mid))
+                    continue
+                parsed = self._process_telethon_message(m)
+                if parsed:
+                    yield parsed
+            return
+
         for m in messages:
-            if not m:
+            if not m or isinstance(m, telethon.tl.types.MessageEmpty):
                 continue
+            parsed = self._process_telethon_message(m)
+            if parsed:
+                yield parsed
 
-            # Media.
-            sticker = None
-            med = None
-            if m.media:
-                # If it's a sticker, get the alt value (unicode emoji).
-                if isinstance(m.media, telethon.tl.types.MessageMediaDocument) and \
-                        hasattr(m.media, "document") and \
-                        m.media.document.mime_type == "application/x-tgsticker":
-                    alt = [a.alt for a in m.media.document.attributes if isinstance(
-                        a, telethon.tl.types.DocumentAttributeSticker)]
-                    if len(alt) > 0:
-                        sticker = alt[0]
-                elif isinstance(m.media, telethon.tl.types.MessageMediaPoll):
-                    med = self._make_poll(m)
-                else:
-                    med = self._get_media(m)
+    def _process_telethon_message(self, m) -> Message:
+        if not m or isinstance(m, telethon.tl.types.MessageEmpty):
+            return None
 
-            # Message.
-            typ = "message"
-            if m.action:
-                if isinstance(m.action, telethon.tl.types.MessageActionChatAddUser):
-                    typ = "user_joined"
-                elif isinstance(m.action, telethon.tl.types.MessageActionChatJoinedByLink):
-                    typ = "user_joined_by_link"
-                elif isinstance(m.action, telethon.tl.types.MessageActionChatDeleteUser):
-                    typ = "user_left"
+        # Media.
+        sticker = None
+        med = None
+        if m.media:
+            # If it's a sticker, get the alt value (unicode emoji).
+            if isinstance(m.media, telethon.tl.types.MessageMediaDocument) and \
+                    hasattr(m.media, "document") and \
+                    m.media.document.mime_type == "application/x-tgsticker":
+                alt = [a.alt for a in m.media.document.attributes if isinstance(
+                    a, telethon.tl.types.DocumentAttributeSticker)]
+                if len(alt) > 0:
+                    sticker = alt[0]
+            elif isinstance(m.media, telethon.tl.types.MessageMediaPoll):
+                med = self._make_poll(m)
+            else:
+                med = self._get_media(m)
 
-            yield Message(
-                type=typ,
-                id=m.id,
-                date=m.date,
-                edit_date=m.edit_date,
-                content=sticker if sticker else m.raw_text,
-                reply_to=m.reply_to_msg_id if m.reply_to and m.reply_to.reply_to_msg_id else None,
-                user=self._get_user(m.sender, m.chat),
-                media=med
-            )
+        # Message.
+        typ = "message"
+        if m.action:
+            if isinstance(m.action, telethon.tl.types.MessageActionChatAddUser):
+                typ = "user_joined"
+            elif isinstance(m.action, telethon.tl.types.MessageActionChatJoinedByLink):
+                typ = "user_joined_by_link"
+            elif isinstance(m.action, telethon.tl.types.MessageActionChatDeleteUser):
+                typ = "user_left"
+
+        return Message(
+            type=typ,
+            id=m.id,
+            date=m.date,
+            edit_date=m.edit_date,
+            content=sticker if sticker else m.raw_text,
+            reply_to=m.reply_to_msg_id if m.reply_to and m.reply_to.reply_to_msg_id else None,
+            user=self._get_user(m.sender, m.chat),
+            media=med,
+            deleted=False
+        )
 
     def _fetch_messages(self, group, offset_id, ids=None) -> Message:
         try:

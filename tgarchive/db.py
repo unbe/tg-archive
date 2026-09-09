@@ -17,6 +17,7 @@ CREATE table messages (
     reply_to INTEGER,
     user_id INTEGER,
     media_id INTEGER,
+    deleted BOOLEAN NOT NULL DEFAULT 0,
     FOREIGN KEY(user_id) REFERENCES users(id),
     FOREIGN KEY(media_id) REFERENCES media(id)
 );
@@ -44,7 +45,7 @@ User = namedtuple(
     "User", ["id", "username", "first_name", "last_name", "tags", "avatar"])
 
 Message = namedtuple(
-    "Message", ["id", "type", "date", "edit_date", "content", "reply_to", "user", "media"])
+    "Message", ["id", "type", "date", "edit_date", "content", "reply_to", "user", "media", "deleted"], defaults=[False])
 
 Media = namedtuple(
     "Media", ["id", "type", "url", "title", "description", "thumb"])
@@ -80,6 +81,17 @@ class DB:
             for s in schema.split("##"):
                 self.conn.cursor().execute(s)
                 self.conn.commit()
+        else:
+            self._migrate()
+
+    def _migrate(self):
+        """Safely apply migrations to an existing database."""
+        cur = self.conn.cursor()
+        cur.execute("PRAGMA table_info(messages)")
+        columns = [row[1] for row in cur.fetchall()]
+        if "deleted" not in columns:
+            cur.execute("ALTER TABLE messages ADD COLUMN deleted BOOLEAN NOT NULL DEFAULT 0")
+            self.conn.commit()
 
     def _parse_date(self, d) -> str:
         return datetime.strptime(d, "%Y-%m-%dT%H:%M:%S%z")
@@ -154,7 +166,8 @@ class DB:
             SELECT messages.id, messages.type, messages.date, messages.edit_date,
             messages.content, messages.reply_to, messages.user_id,
             users.username, users.first_name, users.last_name, users.tags, users.avatar,
-            media.id, media.type, media.url, media.title, media.description, media.thumb
+            media.id, media.type, media.url, media.title, media.description, media.thumb,
+            messages.deleted
             FROM messages
             LEFT JOIN users ON (users.id = messages.user_id)
             LEFT JOIN media ON (media.id = messages.media_id)
@@ -199,10 +212,21 @@ class DB:
                     )
 
     def insert_message(self, m: Message):
+        deleted = getattr(m, "deleted", False)
         cur = self.conn.cursor()
-        cur.execute("""INSERT OR REPLACE INTO messages
-            (id, type, date, edit_date, content, reply_to, user_id, media_id)
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?)""",
+        cur.execute("""INSERT INTO messages
+            (id, type, date, edit_date, content, reply_to, user_id, media_id, deleted)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (id) DO UPDATE SET
+                type=excluded.type,
+                date=excluded.date,
+                edit_date=excluded.edit_date,
+                content=excluded.content,
+                reply_to=excluded.reply_to,
+                user_id=excluded.user_id,
+                media_id=excluded.media_id,
+                deleted=excluded.deleted
+            """,
                     (m.id,
                      m.type,
                      m.date.strftime("%Y-%m-%d %H:%M:%S"),
@@ -211,8 +235,31 @@ class DB:
                      m.content,
                      m.reply_to,
                      m.user.id,
-                     m.media.id if m.media else None)
+                     m.media.id if m.media else None,
+                     1 if deleted else 0)
                     )
+
+    def flag_deleted(self, id: int):
+        """Flag a single message as deleted."""
+        cur = self.conn.cursor()
+        cur.execute("UPDATE messages SET deleted = 1 WHERE id = ?", (id,))
+
+    def flag_deleted_batch(self, ids: list):
+        """Flag multiple messages as deleted in a single query."""
+        if not ids:
+            return
+        cur = self.conn.cursor()
+        cur.execute("UPDATE messages SET deleted = 1 WHERE id IN ({})".format(
+            ",".join("?" * len(ids))), ids)
+
+    def get_active_message_ids(self, since_id: int = None) -> list:
+        """Get all message IDs that are not marked deleted."""
+        cur = self.conn.cursor()
+        if since_id:
+            cur.execute("SELECT id FROM messages WHERE id >= ? AND (deleted = 0 OR deleted IS NULL) ORDER BY id", (since_id,))
+        else:
+            cur.execute("SELECT id FROM messages WHERE (deleted = 0 OR deleted IS NULL) ORDER BY id")
+        return [r[0] for r in cur.fetchall()]
 
     def commit(self):
         """Commit pending writes to the DB."""
@@ -222,7 +269,10 @@ class DB:
         """Makes a Message() object from an SQL result tuple."""
         id, typ, date, edit_date, content, reply_to, \
             user_id, username, first_name, last_name, tags, avatar, \
-            media_id, media_type, media_url, media_title, media_description, media_thumb = m
+            media_id, media_type, media_url, media_title, media_description, media_thumb, \
+            *extra = m
+
+        deleted = bool(extra[0]) if len(extra) > 0 else False
 
         md = None
         if media_id:
@@ -256,4 +306,5 @@ class DB:
                                  last_name=last_name,
                                  tags=tags,
                                  avatar=avatar),
-                       media=md)
+                       media=md,
+                       deleted=deleted)

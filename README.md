@@ -24,6 +24,7 @@ tg-archive uses the [Telethon](https://github.com/LonamiWebs/Telethon) Telegram 
 - Single file Jinja HTML template for generating the static site.
 - Year / Month / Day indexes with deep linking across pages.
 - "In reply to" on replies with links to parent messages across pages.
+- Flags deleted messages in the SQLite database and marks them with a `[Deleted]` badge in the archive.
 - RSS / Atom feed of recent messages.
 
 ## Install
@@ -37,6 +38,8 @@ tg-archive uses the [Telethon](https://github.com/LonamiWebs/Telethon) Telegram 
 1. `tg-archive --new --path=mysite` (creates a new site. `cd` into mysite and edit `config.yaml`).
 1. `tg-archive --sync` (syncs data into `data.sqlite`).
   Note: First time connection will prompt for your phone number + a Telegram auth code sent to the app. On successful auth, a `session.session` file is created. DO NOT SHARE this session file publicly as it contains the API autorization for your account.
+1. `tg-archive --check-deleted` (checks archived messages against Telegram in batches and flags deleted messages in `data.sqlite`).
+1. `tg-archive --listen` (listens in real time for live Telegram events such as message deletions, edits, and new messages).
 1. `tg-archive --build` (builds the static site into the `site` directory, which can be published)
 
 ### Customization

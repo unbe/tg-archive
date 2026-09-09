@@ -90,7 +90,7 @@
 							<span class="title">{{ day }} <span class="count">({{ dayline.get(m.date.strftime("%Y-%m-%d"), {"count": 0}).count }} messages)</span></span>
 						</li>
 					{% endif %}
-					<li class="message type-{{ m.type }}" id="{{ m.id }}">
+					<li class="message type-{{ m.type }}{% if m.deleted %} is-deleted{% endif %}" id="{{ m.id }}">
 						<div class="avatar">
 							{% if m.user.avatar %}
 								<img src="{{ config.media_dir }}/{{ m.user.avatar }}" alt="" />
@@ -120,6 +120,9 @@
 								{% endif %}
 
 								<span class="date">{{ m.date.strftime("%I:%M %p, %d %b %Y") }}</span>
+								{% if m.deleted %}
+									<span class="badge-deleted">[Deleted]</span>
+								{% endif %}
 							</div>
 							<div class="text">
 								{% if m.type == "message" %}

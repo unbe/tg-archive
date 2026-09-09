@@ -218,10 +218,12 @@ div.body > div.text {
 		font-style: italic;
 	}
 
-	/* Individual message block */
 	.messages .message {
 		display: flex;
 		margin-bottom: 35px;
+	}
+	.messages .message.is-deleted {
+		opacity: 0.75;
 	}
 	.messages .message:hover {
 		background: #fcfcfc;
@@ -264,8 +266,13 @@ div.body > div.text {
 		}
 		.messages .meta .reply,
 		.messages .meta .id,
-		.messages .meta .date {
+		.messages .meta .date,
+		.messages .meta .badge-deleted {
 			margin: 0 0 0 30px;
+		}
+		.messages .meta .badge-deleted {
+			color: #e53935;
+			font-weight: 600;
 		}
 
 	/* Body area */
