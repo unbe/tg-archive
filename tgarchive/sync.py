@@ -94,13 +94,13 @@ class Sync:
         logging.info(
             "finished. fetched {} messages. last message = {}".format(n, last_date))
 
-    def check_deleted(self, from_id=None):
+    def check_deleted(self, from_id=None, recent_days=None):
         """
         Check non-deleted messages in the database against Telegram,
         flagging any messages that no longer exist as deleted.
         """
         group_id = self._get_group_id(self.config["group"])
-        all_ids = self.db.get_active_message_ids(since_id=from_id)
+        all_ids = self.db.get_active_message_ids(since_id=from_id, recent_days=recent_days)
         if not all_ids:
             logging.info("no active messages in DB to check for deletion")
             return

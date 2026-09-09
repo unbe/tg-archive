@@ -81,6 +81,8 @@ def main():
                    dest="from_id", help="sync (or update) messages from this id to the latest")
     s.add_argument("--check-deleted", action="store_true", dest="check_deleted",
                    help="check archived messages in the DB against Telegram to flag any that have been deleted")
+    s.add_argument("--recent-days", action="store", type=int, default=None,
+                   dest="recent_days", help="limit deletion check to messages from the last N days")
     s.add_argument("--listen", action="store_true", dest="listen",
                    help="listen for live events (new messages, edits, and deletions) in real time")
 
@@ -156,7 +158,7 @@ def main():
                 s.sync(args.id, args.from_id)
 
             if args.check_deleted:
-                s.check_deleted(args.from_id)
+                s.check_deleted(args.from_id, recent_days=args.recent_days)
 
             if args.listen:
                 s.listen()

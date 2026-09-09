@@ -3,7 +3,7 @@ import math
 import os
 import sqlite3
 from collections import namedtuple
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import pytz
 from typing import Iterator
 
@@ -252,13 +252,20 @@ class DB:
         cur.execute("UPDATE messages SET deleted = 1 WHERE id IN ({})".format(
             ",".join("?" * len(ids))), ids)
 
-    def get_active_message_ids(self, since_id: int = None) -> list:
-        """Get all message IDs that are not marked deleted."""
+    def get_active_message_ids(self, since_id: int = None, recent_days: int = None) -> list:
+        """Get all message IDs that are not marked deleted, optionally filtered by ID or recent days."""
         cur = self.conn.cursor()
-        if since_id:
-            cur.execute("SELECT id FROM messages WHERE id >= ? AND (deleted = 0 OR deleted IS NULL) ORDER BY id", (since_id,))
-        else:
-            cur.execute("SELECT id FROM messages WHERE (deleted = 0 OR deleted IS NULL) ORDER BY id")
+        query = "SELECT id FROM messages WHERE (deleted = 0 OR deleted IS NULL)"
+        params = []
+        if since_id is not None:
+            query += " AND id >= ?"
+            params.append(since_id)
+        if recent_days is not None:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=recent_days)
+            query += " AND date >= ?"
+            params.append(cutoff.strftime("%Y-%m-%d %H:%M:%S"))
+        query += " ORDER BY id"
+        cur.execute(query, params)
         return [r[0] for r in cur.fetchall()]
 
     def commit(self):

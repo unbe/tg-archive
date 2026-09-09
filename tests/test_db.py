@@ -2,7 +2,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import pytz
 
 from tgarchive.db import DB, User, Message, Media
@@ -149,6 +149,18 @@ class TestDB(unittest.TestCase):
 
         active_ids_since = db.get_active_message_ids(since_id=2)
         self.assertEqual(active_ids_since, [3])
+
+        # Test recent_days filtering
+        now = datetime.now(timezone.utc)
+        m_recent = self._sample_message(10, 1, date=now - timedelta(days=2))
+        m_old = self._sample_message(11, 1, date=now - timedelta(days=20))
+        db.insert_message(m_recent)
+        db.insert_message(m_old)
+        db.commit()
+
+        recent_ids = db.get_active_message_ids(recent_days=7)
+        self.assertIn(10, recent_ids)
+        self.assertNotIn(11, recent_ids)
 
 
 if __name__ == "__main__":
