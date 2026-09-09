@@ -25,6 +25,7 @@ class Sync:
     def __init__(self, config, session_file, db):
         self.config = config
         self.db = db
+        self.no_avatar_users = set()
 
         self.client = self.new_client(session_file, config)
 
@@ -127,7 +128,7 @@ class Sync:
                 if not m or isinstance(m, telethon.tl.types.MessageEmpty):
                     chunk_deleted.append(mid)
                 elif getattr(m, "edit_date", None):
-                    parsed = self._process_telethon_message(m)
+                    parsed = self._process_telethon_message(m, download_avatars=False)
                     if parsed:
                         if self.db.insert_message(parsed):
                             chunk_edited += 1
@@ -184,7 +185,7 @@ class Sync:
 
         @self.client.on(events.MessageEdited(chats=group_id))
         async def on_message_edited(event):
-            m = self._process_telethon_message(event.message)
+            m = self._process_telethon_message(event.message, download_avatars=False)
             if m:
                 self.db.insert_user(m.user)
                 if m.media:
@@ -265,7 +266,7 @@ class Sync:
             if parsed:
                 yield parsed
 
-    def _process_telethon_message(self, m) -> Message:
+    def _process_telethon_message(self, m, download_avatars=True) -> Message:
         if not m or isinstance(m, telethon.tl.types.MessageEmpty):
             return None
 
@@ -303,7 +304,7 @@ class Sync:
             edit_date=m.edit_date,
             content=sticker if sticker else m.raw_text,
             reply_to=m.reply_to_msg_id if m.reply_to and m.reply_to.reply_to_msg_id else None,
-            user=self._get_user(m.sender, m.chat),
+            user=self._get_user(m.sender, m.chat, download_avatar=download_avatars),
             media=med,
             deleted=False
         )
@@ -324,7 +325,7 @@ class Sync:
             logging.info(
                 "flood waited: have to wait {} seconds".format(e.seconds))
 
-    def _get_user(self, u, chat) -> User:
+    def _get_user(self, u, chat, download_avatar=True) -> User:
         tags = []
 
         # if user info is empty, check for message from group
@@ -334,7 +335,7 @@ class Sync:
             chat.title != ''
             ):
                 tags.append("group_self")
-                avatar = self._downloadAvatarForUserOrChat(chat)
+                avatar = self._downloadAvatarForUserOrChat(chat) if download_avatar else None
                 return User(
                     id=chat.id,
                     username=chat.title,
@@ -367,7 +368,7 @@ class Sync:
             tags.append("fake")
 
         # Download sender's profile photo if it's not already cached.
-        avatar = self._downloadAvatarForUserOrChat(u)
+        avatar = self._downloadAvatarForUserOrChat(u) if download_avatar else None
 
         return User(
             id=u.id,
@@ -480,6 +481,9 @@ class Sync:
         if os.path.exists(fpath):
             return fname
 
+        if hasattr(self, "no_avatar_users") and user.id in self.no_avatar_users:
+            return None
+
         logging.info("downloading avatar #{}".format(user.id))
 
         # Download the file into a container, resize it, and then write to disk.
@@ -487,6 +491,8 @@ class Sync:
         profile_photo = self.client.download_profile_photo(user, file=b)
         if profile_photo is None:
             logging.info("user has no avatar #{}".format(user.id))
+            if hasattr(self, "no_avatar_users"):
+                self.no_avatar_users.add(user.id)
             return None
 
         im = Image.open(b)

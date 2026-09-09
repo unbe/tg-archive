@@ -205,6 +205,38 @@ class TestSync(unittest.TestCase):
         self.assertEqual(len(edits), 1)
         self.assertEqual(edits[0].content, "Live new message")
 
+    @patch("tgarchive.sync.Sync.new_client")
+    def test_check_updates_skips_avatar_download(self, mock_new_client):
+        mock_client = MagicMock()
+        mock_new_client.return_value = mock_client
+        mock_client.get_dialogs.return_value = []
+        mock_client.get_entity.return_value = DummyEntity(100)
+
+        config = dict(self.config)
+        config["download_avatars"] = True
+
+        date = pytz.utc.localize(datetime(2025, 1, 15, 12, 0, 0))
+        u = User(id=696367351, username="user_no_avatar", first_name="No", last_name="Avatar", tags=[], avatar=None)
+        self.db.insert_user(u)
+        self.db.insert_message(Message(id=201, type="message", date=date, edit_date=None, content="Initial text", reply_to=None, user=u, media=None, deleted=False))
+        self.db.commit()
+
+        # Telethon returns message 201 as edited
+        msg201 = DummyTelethonMessage(201, "Edited text")
+        msg201.sender = DummyTelethonUser(696367351)
+        msg201.edit_date = pytz.utc.localize(datetime(2025, 1, 15, 13, 0, 0))
+        mock_client.get_messages.return_value = [msg201]
+
+        s = Sync(config, "session.session", self.db)
+        s.check_updates()
+
+        # Verify download_profile_photo was NOT called during check_updates
+        mock_client.download_profile_photo.assert_not_called()
+
+        msgs = {m.id: m for m in self.db.get_messages(2025, 1)}
+        self.assertEqual(msgs[201].content, "Edited text")
+
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -219,7 +219,8 @@ class DB:
         cur.execute("""INSERT INTO users (id, username, first_name, last_name, tags, avatar)
             VALUES(?, ?, ?, ?, ?, ?) ON CONFLICT (id)
             DO UPDATE SET username=excluded.username, first_name=excluded.first_name,
-                last_name=excluded.last_name, tags=excluded.tags, avatar=excluded.avatar
+                last_name=excluded.last_name, tags=excluded.tags,
+                avatar=COALESCE(excluded.avatar, users.avatar)
             """, (u.id, u.username, u.first_name, u.last_name, " ".join(u.tags), u.avatar))
 
     def insert_media(self, m: Media):
