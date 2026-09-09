@@ -71,6 +71,10 @@ class Build:
                 if len(messages) == 0:
                     break
 
+                edits_map = self.db.get_edits_for_messages([m.id for m in messages])
+                if edits_map:
+                    messages = [m._replace(edits=edits_map.get(m.id, [])) for m in messages]
+
                 last_id = messages[-1].id
 
                 page += 1

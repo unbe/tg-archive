@@ -162,6 +162,51 @@ class TestDB(unittest.TestCase):
         self.assertIn(10, recent_ids)
         self.assertNotIn(11, recent_ids)
 
+    def test_message_edits_recording(self):
+        db = DB(self.db_path)
+        u = self._sample_user(1)
+        db.insert_user(u)
+
+        d1 = pytz.utc.localize(datetime(2025, 1, 15, 10, 0, 0))
+        d2 = pytz.utc.localize(datetime(2025, 1, 15, 11, 0, 0))
+        d3 = pytz.utc.localize(datetime(2025, 1, 15, 12, 0, 0))
+
+        # Initial message
+        m = Message(id=1, type="message", date=d1, edit_date=None, content="Version 1", reply_to=None, user=u, media=None, deleted=False)
+        db.insert_message(m)
+        db.commit()
+
+        self.assertEqual(len(db.get_message_edits(1)), 0)
+
+        # First edit
+        m_edit1 = Message(id=1, type="message", date=d1, edit_date=d2, content="Version 2", reply_to=None, user=u, media=None, deleted=False)
+        db.insert_message(m_edit1)
+        db.commit()
+
+        edits = db.get_message_edits(1)
+        self.assertEqual(len(edits), 1)
+        self.assertEqual(edits[0].content, "Version 1")
+
+        # Second edit
+        m_edit2 = Message(id=1, type="message", date=d1, edit_date=d3, content="Version 3", reply_to=None, user=u, media=None, deleted=False)
+        db.insert_message(m_edit2)
+        db.commit()
+
+        edits = db.get_message_edits(1)
+        self.assertEqual(len(edits), 2)
+        self.assertEqual(edits[0].content, "Version 1")
+        self.assertEqual(edits[1].content, "Version 2")
+
+        # Current message in DB is Version 3
+        msgs = list(db.get_messages(2025, 1))
+        self.assertEqual(msgs[0].content, "Version 3")
+        self.assertEqual(msgs[0].edit_date, d3)
+
+        # Test get_edits_for_messages
+        batch_edits = db.get_edits_for_messages([1, 999])
+        self.assertEqual(len(batch_edits[1]), 2)
+        self.assertEqual(len(batch_edits[999]), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

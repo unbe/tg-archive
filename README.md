@@ -25,6 +25,7 @@ tg-archive uses the [Telethon](https://github.com/LonamiWebs/Telethon) Telegram 
 - Year / Month / Day indexes with deep linking across pages.
 - "In reply to" on replies with links to parent messages across pages.
 - Flags deleted messages in the SQLite database and marks them with a `[Deleted]` badge in the archive.
+- Tracks and archives previous revisions of edited messages in SQLite and renders edit history in the archive.
 - RSS / Atom feed of recent messages.
 
 ## Install

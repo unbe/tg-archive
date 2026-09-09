@@ -39,13 +39,24 @@ CREATE table media (
     description TEXT,
     thumb TEXT
 );
+##
+CREATE table message_edits (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    message_id INTEGER NOT NULL,
+    date TIMESTAMP,
+    content TEXT,
+    FOREIGN KEY(message_id) REFERENCES messages(id)
+);
 """
 
 User = namedtuple(
     "User", ["id", "username", "first_name", "last_name", "tags", "avatar"])
 
 Message = namedtuple(
-    "Message", ["id", "type", "date", "edit_date", "content", "reply_to", "user", "media", "deleted"], defaults=[False])
+    "Message", ["id", "type", "date", "edit_date", "content", "reply_to", "user", "media", "deleted", "edits"], defaults=[False, None])
+
+MessageEdit = namedtuple(
+    "MessageEdit", ["id", "message_id", "date", "content"])
 
 Media = namedtuple(
     "Media", ["id", "type", "url", "title", "description", "thumb"])
@@ -91,6 +102,19 @@ class DB:
         columns = [row[1] for row in cur.fetchall()]
         if "deleted" not in columns:
             cur.execute("ALTER TABLE messages ADD COLUMN deleted BOOLEAN NOT NULL DEFAULT 0")
+            self.conn.commit()
+
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='message_edits'")
+        if not cur.fetchone():
+            cur.execute("""
+            CREATE table message_edits (
+                id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                message_id INTEGER NOT NULL,
+                date TIMESTAMP,
+                content TEXT,
+                FOREIGN KEY(message_id) REFERENCES messages(id)
+            )
+            """)
             self.conn.commit()
 
     def _parse_date(self, d) -> str:
@@ -214,6 +238,19 @@ class DB:
     def insert_message(self, m: Message):
         deleted = getattr(m, "deleted", False)
         cur = self.conn.cursor()
+
+        # If message exists and content has changed, record old version in message_edits
+        cur.execute("SELECT content, edit_date, date FROM messages WHERE id = ?", (m.id,))
+        row = cur.fetchone()
+        if row:
+            old_content, old_edit_date, old_date = row
+            if old_content is not None and old_content != m.content:
+                rev_date = old_edit_date or old_date
+                cur.execute("""
+                    INSERT INTO message_edits (message_id, date, content)
+                    VALUES (?, ?, ?)
+                """, (m.id, rev_date.strftime("%Y-%m-%d %H:%M:%S") if hasattr(rev_date, "strftime") else str(rev_date) if rev_date else None, old_content))
+
         cur.execute("""INSERT INTO messages
             (id, type, date, edit_date, content, reply_to, user_id, media_id, deleted)
             VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -238,6 +275,33 @@ class DB:
                      m.media.id if m.media else None,
                      1 if deleted else 0)
                     )
+
+    def get_message_edits(self, message_id: int) -> list:
+        """Get edit revisions for a specific message ID in chronological order."""
+        cur = self.conn.cursor()
+        cur.execute("SELECT id, message_id, date, content FROM message_edits WHERE message_id = ? ORDER BY id ASC", (message_id,))
+        edits = []
+        for r in cur.fetchall():
+            d = pytz.utc.localize(r[2]) if r[2] else None
+            if self.tz and d:
+                d = d.astimezone(self.tz)
+            edits.append(MessageEdit(id=r[0], message_id=r[1], date=d, content=r[3]))
+        return edits
+
+    def get_edits_for_messages(self, message_ids: list) -> dict:
+        """Batch load edit revisions for a list of message IDs, returning {message_id: [MessageEdit, ...]}."""
+        if not message_ids:
+            return {}
+        cur = self.conn.cursor()
+        cur.execute("SELECT id, message_id, date, content FROM message_edits WHERE message_id IN ({}) ORDER BY id ASC".format(
+            ",".join("?" * len(message_ids))), message_ids)
+        edits_map = {mid: [] for mid in message_ids}
+        for r in cur.fetchall():
+            d = pytz.utc.localize(r[2]) if r[2] else None
+            if self.tz and d:
+                d = d.astimezone(self.tz)
+            edits_map.setdefault(r[1], []).append(MessageEdit(id=r[0], message_id=r[1], date=d, content=r[3]))
+        return edits_map
 
     def flag_deleted(self, id: int):
         """Flag a single message as deleted."""

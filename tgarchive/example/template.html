@@ -120,6 +120,22 @@
 								{% endif %}
 
 								<span class="date">{{ m.date.strftime("%I:%M %p, %d %b %Y") }}</span>
+								{% if m.edits %}
+									<details class="edits-dropdown">
+										<summary class="date edited" title="Edited: view {{ m.edits | length }} previous version(s)">(edited)</summary>
+										<div class="edits-history">
+											<div class="edits-title">Previous version(s):</div>
+											{% for e in m.edits %}
+												<div class="edit-item">
+													<span class="edit-date">{{ e.date.strftime("%I:%M %p, %d %b %Y") if e.date else "Initial" }}:</span>
+													<div class="edit-content">{{ nl2br(e.content | escape) | safe | urlize }}</div>
+												</div>
+											{% endfor %}
+										</div>
+									</details>
+								{% elif m.edit_date %}
+									<span class="date edited" title="Edited on {{ m.edit_date.strftime('%I:%M %p, %d %b %Y') }}">(edited)</span>
+								{% endif %}
 								{% if m.deleted %}
 									<span class="badge-deleted">[Deleted]</span>
 								{% endif %}

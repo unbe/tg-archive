@@ -61,6 +61,12 @@ class TestBuild(unittest.TestCase):
         self.db.insert_message(m2)
         self.db.commit()
 
+        # Edit message 1
+        edit_date = pytz.utc.localize(datetime(2025, 1, 15, 13, 0, 0))
+        m1_edited = Message(id=1, type="message", date=date, edit_date=edit_date, content="Edited message text", reply_to=None, user=u, media=None, deleted=False)
+        self.db.insert_message(m1_edited)
+        self.db.commit()
+
         cur_dir = os.getcwd()
         os.chdir(self.site_dir)
         try:
@@ -78,9 +84,12 @@ class TestBuild(unittest.TestCase):
         with open(index_file, "r", encoding="utf-8") as f:
             html = f.read()
 
-        # Verify message 1
+        # Verify message 1 has latest text and previous edit in edits-dropdown
         self.assertIn('id="1"', html)
         self.assertNotIn('class="message type-message is-deleted" id="1"', html)
+        self.assertIn('Edited message text', html)
+        self.assertIn('Normal message', html)
+        self.assertIn('edits-dropdown', html)
 
         # Verify message 2 has is-deleted class and badge
         self.assertIn('class="message type-message is-deleted" id="2"', html)

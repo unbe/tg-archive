@@ -274,6 +274,48 @@ div.body > div.text {
 			color: #e53935;
 			font-weight: 600;
 		}
+		.messages .meta .edits-dropdown {
+			display: inline-block;
+			margin-left: 10px;
+			position: relative;
+			cursor: pointer;
+		}
+		.messages .meta .edits-dropdown summary {
+			color: var(--light);
+			outline: none;
+		}
+		.messages .meta .edits-dropdown[open] .edits-history {
+			position: absolute;
+			left: 0;
+			top: 100%;
+			background: #fff;
+			border: 1px solid #ddd;
+			border-radius: 4px;
+			padding: 10px;
+			min-width: 250px;
+			max-width: 400px;
+			box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+			z-index: 100;
+			margin-top: 5px;
+			white-space: normal;
+		}
+		.messages .meta .edits-history .edits-title {
+			font-weight: 600;
+			margin-bottom: 5px;
+			color: #333;
+		}
+		.messages .meta .edits-history .edit-item {
+			padding: 5px 0;
+			border-top: 1px solid #eee;
+		}
+		.messages .meta .edits-history .edit-date {
+			font-size: var(--size-xsmall);
+			color: var(--light);
+		}
+		.messages .meta .edits-history .edit-content {
+			color: #444;
+			margin-top: 2px;
+		}
 
 	/* Body area */
 	.messages .body {
