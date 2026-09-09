@@ -56,7 +56,7 @@ Message = namedtuple(
     "Message", ["id", "type", "date", "edit_date", "content", "reply_to", "user", "media", "deleted", "edits"], defaults=[False, None])
 
 MessageEdit = namedtuple(
-    "MessageEdit", ["id", "message_id", "date", "content"])
+    "MessageEdit", ["id", "message_id", "date", "content", "diff"], defaults=[None])
 
 Media = namedtuple(
     "Media", ["id", "type", "url", "title", "description", "thumb"])

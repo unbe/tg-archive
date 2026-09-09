@@ -128,7 +128,7 @@
 											{% for e in m.edits %}
 												<div class="edit-item">
 													<span class="edit-date">{{ e.date.strftime("%I:%M %p, %d %b %Y") if e.date else "Initial" }}:</span>
-													<div class="edit-content">{{ nl2br(e.content | escape) | safe | urlize }}</div>
+													<div class="edit-content">{% if e.diff %}{{ e.diff | safe }}{% else %}{{ nl2br(e.content | escape) | safe | urlize }}{% endif %}</div>
 												</div>
 											{% endfor %}
 										</div>

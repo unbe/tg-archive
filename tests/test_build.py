@@ -88,7 +88,8 @@ class TestBuild(unittest.TestCase):
         self.assertIn('id="1"', html)
         self.assertNotIn('class="message type-message is-deleted" id="1"', html)
         self.assertIn('Edited message text', html)
-        self.assertIn('Normal message', html)
+        self.assertIn('diff-del">Normal</del>', html)
+        self.assertIn('diff-ins">Edited</ins>', html)
         self.assertIn('edits-dropdown', html)
 
         # Verify message 2 has is-deleted class and badge

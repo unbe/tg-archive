@@ -1,5 +1,7 @@
 from collections import OrderedDict, deque
 from importlib.metadata import version
+import difflib
+import html
 import logging
 import math
 import os
@@ -73,7 +75,18 @@ class Build:
 
                 edits_map = self.db.get_edits_for_messages([m.id for m in messages])
                 if edits_map:
-                    messages = [m._replace(edits=edits_map.get(m.id, [])) for m in messages]
+                    updated_messages = []
+                    for m in messages:
+                        edits = edits_map.get(m.id, [])
+                        if edits:
+                            computed_edits = []
+                            for idx, e in enumerate(edits):
+                                next_text = edits[idx + 1].content if idx + 1 < len(edits) else m.content
+                                diff_html = self._render_diff(e.content, next_text)
+                                computed_edits.append(e._replace(diff=diff_html))
+                            m = m._replace(edits=computed_edits)
+                        updated_messages.append(m)
+                    messages = updated_messages
 
                 last_id = messages[-1].id
 
@@ -227,3 +240,25 @@ class Build:
         src = os.path.relpath(src, dir_path)
         dst = os.path.join(dir_path, os.path.basename(src))
         return os.symlink(src, dst)
+
+    def _render_diff(self, old_text: str, new_text: str) -> str:
+        """Compute an inline word/token diff between old_text and new_text with HTML highlights."""
+        if not old_text and not new_text:
+            return ""
+        if old_text == new_text:
+            return html.escape(old_text or "").replace("\n", "<br />")
+
+        tokens_old = re.findall(r"\w+|\s+|[^\w\s]", old_text or "", re.UNICODE)
+        tokens_new = re.findall(r"\w+|\s+|[^\w\s]", new_text or "", re.UNICODE)
+        matcher = difflib.SequenceMatcher(None, tokens_old, tokens_new)
+        result = []
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag == "equal":
+                result.append(html.escape("".join(tokens_old[i1:i2])))
+            elif tag == "delete":
+                result.append(f'<del class="diff-del">{html.escape("".join(tokens_old[i1:i2]))}</del>')
+            elif tag == "insert":
+                result.append(f'<ins class="diff-ins">{html.escape("".join(tokens_new[j1:j2]))}</ins>')
+            elif tag == "replace":
+                result.append(f'<del class="diff-del">{html.escape("".join(tokens_old[i1:i2]))}</del><ins class="diff-ins">{html.escape("".join(tokens_new[j1:j2]))}</ins>')
+        return "".join(result).replace("\n", "<br />")

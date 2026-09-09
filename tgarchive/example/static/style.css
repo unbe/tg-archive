@@ -315,6 +315,21 @@ div.body > div.text {
 		.messages .meta .edits-history .edit-content {
 			color: #444;
 			margin-top: 2px;
+			line-height: 1.4;
+		}
+		.messages .meta .edits-history .diff-del {
+			background-color: #ffeef0;
+			color: #b31d28;
+			text-decoration: line-through;
+			padding: 1px 3px;
+			border-radius: 3px;
+		}
+		.messages .meta .edits-history .diff-ins {
+			background-color: #e6ffed;
+			color: #22863a;
+			text-decoration: none;
+			padding: 1px 3px;
+			border-radius: 3px;
 		}
 
 	/* Body area */
