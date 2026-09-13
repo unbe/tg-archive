@@ -2,13 +2,13 @@ from io import BytesIO
 import os
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 import pytz
 
 import telethon.tl.types
 from tgarchive.db import DB, User, Message, Media
-from tgarchive.sync import Sync, parse_period
+from tgarchive.sync import Sync, parse_period, parse_recent_days
 
 
 class DummyEntity:
@@ -430,6 +430,18 @@ class TestSync(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_period("10foos")
 
+        self.assertIsNone(parse_recent_days(None))
+        self.assertIsNone(parse_recent_days(""))
+        self.assertIsNone(parse_recent_days("true"))
+        self.assertEqual(parse_recent_days(7), 7.0)
+        self.assertEqual(parse_recent_days("7"), 7.0)
+        self.assertEqual(parse_recent_days("7d"), 7.0)
+        self.assertEqual(parse_recent_days("2w"), 14.0)
+        self.assertEqual(parse_recent_days("48h"), 2.0)
+        self.assertEqual(parse_recent_days("12h"), 0.5)
+        with self.assertRaises(ValueError):
+            parse_recent_days("invalid")
+
     @patch("tgarchive.sync.Sync.new_client")
     def test_listen_with_timeout(self, mock_new_client):
         import asyncio
@@ -474,10 +486,35 @@ class TestSync(unittest.TestCase):
         s.listen(timeout="-10s")
         self.assertFalse(mock_client.run_until_disconnected.called)
 
+    @patch("tgarchive.sync.Sync.new_client")
+    def test_check_updates_with_recent(self, mock_new_client):
+        mock_client = MagicMock()
+        mock_new_client.return_value = mock_client
+        mock_client.get_dialogs.return_value = []
+        mock_client.get_entity.return_value = DummyEntity(100)
+
+        now = datetime.now(pytz.utc)
+        recent_date = now - timedelta(days=2)
+        old_date = now - timedelta(days=20)
+        u = User(id=1, username="user1", first_name="First", last_name="Last", tags=[], avatar=None)
+        self.db.insert_user(u)
+        self.db.insert_message(Message(id=201, type="message", date=recent_date, edit_date=None, content="Recent msg", reply_to=None, user=u, media=None, deleted=False))
+        self.db.insert_message(Message(id=202, type="message", date=old_date, edit_date=None, content="Old msg", reply_to=None, user=u, media=None, deleted=False))
+        self.db.commit()
+
+        msg201 = DummyTelethonMessage(201, "Recent msg", date=recent_date)
+        mock_client.get_messages.return_value = [msg201]
+
+        s = Sync(self.config, "session.session", self.db)
+        s.check_updates(recent="7d")
+
+        called_ids = mock_client.get_messages.call_args[1].get("ids") if "ids" in mock_client.get_messages.call_args[1] else mock_client.get_messages.call_args[0][1]
+        self.assertEqual(called_ids, [201])
+
     @patch("tgarchive.get_config")
     @patch("tgarchive.sync.Sync")
     @patch("tgarchive.DB")
-    def test_cli_listen_arguments(self, mock_db, mock_sync_cls, mock_get_config):
+    def test_cli_sync_arguments(self, mock_db, mock_sync_cls, mock_get_config):
         import asyncio
         import tgarchive
         mock_get_config.return_value = dict(self.config)
@@ -495,14 +532,19 @@ class TestSync(unittest.TestCase):
                 mock_sync.listen.assert_called_with(timeout="15m")
 
             mock_sync.reset_mock()
-            with patch("sys.argv", ["tg-archive", "--listen-period", "2h"]):
+            with patch("sys.argv", ["tg-archive", "--check-updates"]):
                 tgarchive.main()
-                mock_sync.listen.assert_called_with(timeout="2h")
+                mock_sync.check_updates.assert_called_with(None, recent=None)
 
             mock_sync.reset_mock()
-            with patch("sys.argv", ["tg-archive", "--listen-timeout", "30s"]):
+            with patch("sys.argv", ["tg-archive", "--check-updates", "7d"]):
                 tgarchive.main()
-                mock_sync.listen.assert_called_with(timeout="30s")
+                mock_sync.check_updates.assert_called_with(None, recent="7d")
+
+            mock_sync.reset_mock()
+            with patch("sys.argv", ["tg-archive", "--check-deleted", "2w"]):
+                tgarchive.main()
+                mock_sync.check_updates.assert_called_with(None, recent="2w")
 
             mock_sync.reset_mock()
             cfg_with_period = dict(self.config)

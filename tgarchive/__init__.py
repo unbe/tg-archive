@@ -79,14 +79,11 @@ def main():
                    dest="id", help="sync (or update) messages for given ids")
     s.add_argument("-from-id", "--from-id", action="store", type=int,
                    dest="from_id", help="sync (or update) messages from this id to the latest")
-    s.add_argument("--check-updates", "--check-deleted", action="store_true", dest="check_updates",
-                   help="check archived messages in the DB against Telegram to flag deletions and record edits")
-    s.add_argument("--recent-days", action="store", type=int, default=None,
-                   dest="recent_days", help="limit update/deletion check to messages from the last N days")
+    s.add_argument("--check-updates", "--check-deleted", action="store", nargs="?", const="true", default=None,
+                   dest="check_updates",
+                   help="check archived messages in the DB against Telegram to flag deletions and record edits; optionally specify period, e.g. --check-updates 7d, --check-updates 30d")
     s.add_argument("--listen", action="store", nargs="?", const="true", default=None, dest="listen",
                    help="listen for live events (new messages, edits, and deletions) in real time; optionally specify duration, e.g. --listen 10m")
-    s.add_argument("--listen-period", "--listen-timeout", action="store", type=str, default=None,
-                   dest="listen_period", help="exit listen mode after the specified period (e.g. 30s, 10m, 2h, 1d, or seconds)")
 
     b = p.add_argument_group("build")
     b.add_argument("-b", "--build", action="store_true",
@@ -131,7 +128,7 @@ def main():
                 os.chmod(os.path.join(root, f), 0o644)
 
     # Sync from Telegram.
-    elif args.sync or args.check_updates or args.listen or args.listen_period:
+    elif args.sync or args.check_updates or args.listen:
         # Import because the Telegram client import is quite heavy.
         from .sync import Sync
         # patch for python 3.14
@@ -153,17 +150,22 @@ def main():
 
         try:
             s = Sync(cfg, args.session, DB(args.data))
-            if args.sync or (not args.check_updates and not args.listen and not args.listen_period):
+            if args.sync or (not args.check_updates and not args.listen):
                 logging.info("starting Telegram sync (batch_size={}, limit={}, wait={}, mode={})".format(
                     cfg["fetch_batch_size"], cfg["fetch_limit"], cfg["fetch_wait"], mode
                 ))
                 s.sync(args.id, args.from_id)
 
             if args.check_updates:
-                s.check_updates(args.from_id, recent_days=args.recent_days)
+                recent = None if args.check_updates == "true" else args.check_updates
+                try:
+                    s.check_updates(args.from_id, recent=recent)
+                except ValueError as e:
+                    logging.error(f"invalid check-updates period: {e}")
+                    sys.exit(1)
 
-            if args.listen or args.listen_period:
-                period = args.listen_period or (args.listen if args.listen != "true" else None)
+            if args.listen:
+                period = None if args.listen == "true" else args.listen
                 if not period:
                     period = cfg.get("listen_period") or cfg.get("listen_timeout")
                 try:

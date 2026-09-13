@@ -67,6 +67,27 @@ def parse_period(s) -> float:
     return -total if is_negative else total
 
 
+def parse_recent_days(s) -> float:
+    """
+    Parse a recent days/period string (e.g. 7, '7', '7d', '2w', '48h', '30 days')
+    into number of days as a float. If None or 'true', returns None.
+    """
+    if s is None:
+        return None
+    if isinstance(s, (int, float)):
+        return float(s)
+
+    s = str(s).strip()
+    if not s or s.lower() == "true":
+        return None
+
+    if re.match(r"^[+-]?\d+(?:\.\d+)?$", s):
+        return float(s)
+
+    seconds = parse_period(s)
+    return seconds / 86400.0
+
+
 class Sync:
     """
     Sync iterates and receives messages from the Telegram group to the
@@ -148,13 +169,16 @@ class Sync:
         logging.info(
             "finished. fetched {} messages. last message = {}".format(n, last_date))
 
-    def check_updates(self, from_id=None, recent_days=None):
+    def check_updates(self, from_id=None, recent=None, recent_days=None):
         """
         Check non-deleted messages in the database against Telegram,
         flagging any deleted messages and recording edits for modified messages.
+        `recent` (or `recent_days`) can be a duration string (e.g. '7d', '2w', '48h') or number of days (e.g. 7).
         """
         group_id = self._get_group_id(self.config["group"])
-        all_ids = self.db.get_active_message_ids(since_id=from_id, recent_days=recent_days)
+        val = recent if recent is not None else recent_days
+        days = parse_recent_days(val) if val is not None else None
+        all_ids = self.db.get_active_message_ids(since_id=from_id, recent_days=days)
         if not all_ids:
             logging.info("no active messages in DB to check for updates")
             return
