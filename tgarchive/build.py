@@ -16,6 +16,10 @@ from .db import User, Message
 
 
 _NL2BR = re.compile(r"\n\n+")
+_RE_TG_LINK = re.compile(
+    r"(?P<url>(?:https?://)?(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog)/(?:c/(?P<c_id>\d+)|s/(?P<s_username>[a-zA-Z0-9_]+)|(?P<username>[a-zA-Z0-9_]+))/(?:(?P<topic_id>\d+)/)?(?P<msg_id>\d+)/?(?:[?#][^\s<>]*)?|tg://(?:privatepost\?channel=(?P<tg_c_id>\d+)&(?:amp;)?post=(?P<tg_msg_id>\d+)|resolve\?domain=(?P<tg_username>[a-zA-Z0-9_]+)&(?:amp;)?post=(?P<tg_u_msg_id>\d+)))",
+    re.IGNORECASE
+)
 
 
 class Build:
@@ -35,6 +39,8 @@ class Build:
         # parent messages that may be on arbitrary pages.
         self.page_ids = {}
         self.timeline = OrderedDict()
+        self.chat_identifiers = set()
+        self._init_chat_identifiers()
 
     def build(self):
         # (Re)create the output directory.
@@ -53,6 +59,7 @@ class Build:
         # Queue to store the latest N items to publish in the RSS feed.
         rss_entries = deque([], self.config["rss_feed_entries"])
         fname = None
+        pages_to_render = []
         for month in timeline:
             # Get the days + message counts for the month.
             dayline = OrderedDict()
@@ -73,21 +80,6 @@ class Build:
                 if len(messages) == 0:
                     break
 
-                edits_map = self.db.get_edits_for_messages([m.id for m in messages])
-                if edits_map:
-                    updated_messages = []
-                    for m in messages:
-                        edits = edits_map.get(m.id, [])
-                        if edits:
-                            computed_edits = []
-                            for idx, e in enumerate(edits):
-                                next_text = edits[idx + 1].content if idx + 1 < len(edits) else m.content
-                                diff_html = self._render_diff(e.content, next_text)
-                                computed_edits.append(e._replace(diff=diff_html))
-                            m = m._replace(edits=computed_edits)
-                        updated_messages.append(m)
-                    messages = updated_messages
-
                 last_id = messages[-1].id
 
                 page += 1
@@ -98,11 +90,31 @@ class Build:
                 for m in messages:
                     self.page_ids[m.id] = fname
 
-                if self.config["publish_rss_feed"]:
-                    rss_entries.extend(messages)
+                pages_to_render.append((messages, month, dayline, fname, page, total_pages))
 
-                self._render_page(messages, month, dayline,
-                                  fname, page, total_pages)
+        # Render all pages after page_ids is completely populated across all months
+        fname = pages_to_render[-1][3] if pages_to_render else None
+        for messages, month, dayline, fname_page, page, total_pages in pages_to_render:
+            edits_map = self.db.get_edits_for_messages([m.id for m in messages])
+            if edits_map:
+                updated_messages = []
+                for m in messages:
+                    edits = edits_map.get(m.id, [])
+                    if edits:
+                        computed_edits = []
+                        for idx, e in enumerate(edits):
+                            next_text = edits[idx + 1].content if idx + 1 < len(edits) else m.content
+                            diff_html = self._render_diff(e.content, next_text)
+                            computed_edits.append(e._replace(diff=diff_html))
+                        m = m._replace(edits=computed_edits)
+                    updated_messages.append(m)
+                messages = updated_messages
+
+            if self.config["publish_rss_feed"]:
+                rss_entries.extend(messages)
+
+            self._render_page(messages, month, dayline,
+                              fname_page, page, total_pages)
 
         # The last page chronologically is the latest page. Make it index.
         if fname:
@@ -139,7 +151,8 @@ class Build:
                                     pagination={"current": page,
                                                 "total": total_pages},
                                     make_filename=self.make_filename,
-                                    nl2br=self._nl2br)
+                                    nl2br=self._nl2br,
+                                    get_archive_url=self.get_archive_url)
 
         with open(os.path.join(self.config["publish_dir"], fname), "w", encoding="utf8") as f:
             f.write(html)
@@ -194,7 +207,8 @@ class Build:
                                             m=m,
                                             media_mime=media_mime,
                                             page_ids=self.page_ids,
-                                            nl2br=self._nl2br)
+                                            nl2br=self._nl2br,
+                                            get_archive_url=self.get_archive_url)
         out = m.content
         if not out and m.media:
             out = m.media.title
@@ -203,7 +217,120 @@ class Build:
     def _nl2br(self, s) -> str:
         # There has to be a \n before <br> so as to not break
         # Jinja's automatic hyperlinking of URLs.
-        return _NL2BR.sub("\n\n", s).replace("\n", "\n<br />")
+        res = _NL2BR.sub("\n\n", s).replace("\n", "\n<br />")
+        return self._link_archive_urls(res)
+
+    def _init_chat_identifiers(self):
+        self.chat_identifiers = set()
+
+        if "group" in self.config and self.config["group"]:
+            g = str(self.config["group"]).strip()
+            # If group is a URL like https://t.me/c/1450089406 or https://t.me/mygroup
+            m_url = re.search(r"(?:t\.me|telegram\.me)/(?:c/(\d+)|s/([a-zA-Z0-9_]+)|([a-zA-Z0-9_]+))", g)
+            if m_url:
+                if m_url.group(1):
+                    self.chat_identifiers.add(m_url.group(1))
+                if m_url.group(2):
+                    self.chat_identifiers.add(m_url.group(2).lower())
+                if m_url.group(3):
+                    self.chat_identifiers.add(m_url.group(3).lower())
+
+            if g.startswith("@"):
+                self.chat_identifiers.add(g[1:].lower())
+            else:
+                self.chat_identifiers.add(g.lower())
+
+            clean_id = g.lstrip("-")
+            if clean_id.startswith("100") and len(clean_id) > 3:
+                clean_id = clean_id[3:]
+            if clean_id.isdigit():
+                self.chat_identifiers.add(clean_id)
+
+        if "group_id" in self.config and self.config["group_id"]:
+            gid = str(self.config["group_id"]).strip().lstrip("-")
+            if gid.startswith("100") and len(gid) > 3:
+                gid = gid[3:]
+            if gid.isdigit():
+                self.chat_identifiers.add(gid)
+
+        if "group_username" in self.config and self.config["group_username"]:
+            u = str(self.config["group_username"]).strip().lstrip("@").lower()
+            self.chat_identifiers.add(u)
+
+        if self.db:
+            try:
+                cur = self.db.conn.cursor()
+                cur.execute("SELECT id, username FROM users WHERE tags LIKE '%group_self%'")
+                for row in cur.fetchall():
+                    uid, uname = row[0], row[1]
+                    if uid:
+                        cid = str(uid).lstrip("-")
+                        if cid.startswith("100") and len(cid) > 3:
+                            cid = cid[3:]
+                        if cid.isdigit():
+                            self.chat_identifiers.add(cid)
+                    if uname:
+                        self.chat_identifiers.add(str(uname).lstrip("@").lower())
+            except Exception:
+                pass
+
+    def get_archive_url(self, url: str):
+        if not url:
+            return None
+        m = _RE_TG_LINK.search(url)
+        if not m:
+            return None
+        cid = m.group("c_id") or m.group("tg_c_id")
+        user = m.group("username") or m.group("s_username") or m.group("tg_username")
+        mid_str = m.group("msg_id") or m.group("tg_msg_id") or m.group("tg_u_msg_id")
+        if not mid_str:
+            return None
+
+        is_match = False
+        if cid and cid in self.chat_identifiers:
+            is_match = True
+        elif user and user.lower() in self.chat_identifiers:
+            is_match = True
+        elif int(mid_str) in self.page_ids:
+            if cid:
+                self.chat_identifiers.add(cid)
+                is_match = True
+            elif user:
+                self.chat_identifiers.add(user.lower())
+                is_match = True
+
+        if not is_match:
+            return None
+
+        mid = int(mid_str)
+        if mid in self.page_ids:
+            return f"{self.page_ids[mid]}#{mid}"
+        return f"#{mid}"
+
+    def _link_archive_urls(self, text: str) -> str:
+        if not text:
+            return text
+
+        def repl(match):
+            full = match.group(0)
+            end = match.end()
+            after = text[end:end+120]
+            if after.strip().startswith('(<a href=') and 'class="archive-link"' in after:
+                return full
+
+            trail = ""
+            while full and full[-1] in ".,;:!?)":
+                trail = full[-1] + trail
+                full = full[:-1]
+
+            archive_url = self.get_archive_url(full)
+            if not archive_url:
+                return match.group(0)
+
+            archive_tag = f' (<a href="{archive_url}" class="archive-link">archive</a>)'
+            return f"{full}{archive_tag}{trail}"
+
+        return _RE_TG_LINK.sub(repl, text)
 
     def _create_publish_dir(self):
         pubdir = self.config["publish_dir"]
@@ -246,7 +373,7 @@ class Build:
         if not old_text and not new_text:
             return ""
         if old_text == new_text:
-            return html.escape(old_text or "").replace("\n", "<br />")
+            return self._link_archive_urls(html.escape(old_text or "").replace("\n", "<br />"))
 
         tokens_old = re.findall(r"\w+|\s+|[^\w\s]", old_text or "", re.UNICODE)
         tokens_new = re.findall(r"\w+|\s+|[^\w\s]", new_text or "", re.UNICODE)
@@ -261,4 +388,4 @@ class Build:
                 result.append(f'<ins class="diff-ins">{html.escape("".join(tokens_new[j1:j2]))}</ins>')
             elif tag == "replace":
                 result.append(f'<del class="diff-del">{html.escape("".join(tokens_old[i1:i2]))}</del><ins class="diff-ins">{html.escape("".join(tokens_new[j1:j2]))}</ins>')
-        return "".join(result).replace("\n", "<br />")
+        return self._link_archive_urls("".join(result).replace("\n", "<br />"))

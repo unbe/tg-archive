@@ -332,6 +332,15 @@ div.body > div.text {
 			border-radius: 3px;
 		}
 
+		.archive-link {
+			font-size: var(--size-small);
+			color: var(--light);
+			text-decoration: underline;
+		}
+		.archive-link:hover {
+			color: var(--primary);
+		}
+
 	/* Body area */
 	.messages .body {
 		flex: 90%;

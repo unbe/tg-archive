@@ -6,7 +6,7 @@ from datetime import datetime
 import pytz
 
 from tgarchive.build import Build
-from tgarchive.db import DB, User, Message
+from tgarchive.db import DB, User, Message, Media
 
 
 class TestBuild(unittest.TestCase):
@@ -96,6 +96,68 @@ class TestBuild(unittest.TestCase):
         self.assertIn('class="message type-message is-deleted" id="2"', html)
         self.assertIn('[Deleted]', html)
         self.assertIn('badge-deleted', html)
+
+    def test_build_internal_archive_links(self):
+        # Configure group with negative supergroup ID: -1001450089406
+        config = dict(self.config)
+        config["group"] = -1001450089406
+
+        date = pytz.utc.localize(datetime(2025, 1, 15, 12, 0, 0))
+        u = User(id=1, username="alice", first_name="Alice", last_name="Smith", tags=[], avatar=None)
+        self.db.insert_user(u)
+
+        # Message 360070 is target
+        m70 = Message(id=360070, type="message", date=date, edit_date=None,
+                      content="Target message to be referenced", reply_to=None, user=u, media=None, deleted=False)
+        # Message 360072 links to 360070
+        m72 = Message(id=360072, type="message", date=date, edit_date=None,
+                      content="As discussed in https://t.me/c/1450089406/360070.", reply_to=None, user=u, media=None, deleted=False)
+        # Message 360073 links to 360072 with query param
+        m73 = Message(id=360073, type="message", date=date, edit_date=None,
+                      content="Check https://t.me/c/1450089406/360072?single for details.", reply_to=None, user=u, media=None, deleted=False)
+        # Message 360074 links to an external group
+        m74 = Message(id=360074, type="message", date=date, edit_date=None,
+                      content="External link https://t.me/c/9999999999/12345 should not get archive link.", reply_to=None, user=u, media=None, deleted=False)
+        # Message 360075 has webpage media pointing to 360070
+        med = Media(id=360075, type="webpage", url="https://t.me/c/1450089406/360070", title="Telegram Link", description="Webpage preview", thumb=None)
+        self.db.insert_media(med)
+        m75 = Message(id=360075, type="message", date=date, edit_date=None,
+                      content="Here is a webpage preview message", reply_to=None, user=u, media=med, deleted=False)
+
+        for m in [m70, m72, m73, m74, m75]:
+            self.db.insert_message(m)
+        self.db.commit()
+
+        cur_dir = os.getcwd()
+        os.chdir(self.site_dir)
+        try:
+            builder = Build(config, self.db, symlink=False)
+            builder.load_template(self.template_path)
+            builder.load_rss_template(self.rss_template_path)
+            builder.build()
+        finally:
+            os.chdir(cur_dir)
+
+        index_file = os.path.join(self.publish_dir, "index.html")
+        self.assertTrue(os.path.exists(index_file))
+
+        with open(index_file, "r", encoding="utf-8") as f:
+            html = f.read()
+
+        # Message 360072: internal link must be followed by archive link pointing to target
+        self.assertIn('href="https://t.me/c/1450089406/360070"', html)
+        self.assertIn('(<a href="2025-01.html#360070" class="archive-link">archive</a>)', html)
+
+        # Message 360073: query param link pointing to 360072
+        self.assertIn('href="https://t.me/c/1450089406/360072?single"', html)
+        self.assertIn('(<a href="2025-01.html#360072" class="archive-link">archive</a>)', html)
+
+        # Message 360074: external link to other channel has no archive link
+        self.assertIn('href="https://t.me/c/9999999999/12345"', html)
+        self.assertNotIn('12345" class="archive-link"', html)
+
+        # Message 360075: webpage media link pointing to internal message has archive link
+        self.assertIn('(<a href="2025-01.html#360070" class="archive-link">archive</a>)', html)
 
 
 if __name__ == "__main__":

@@ -155,8 +155,14 @@
 								<div class="media">
 									{% if m.media.type == "webpage" and (m.media.title or m.media.description) %}
 										<a href="{{ m.media.url }}" rel="noreferer nopener nofollow">{{ m.media.title or "Link" }}</a>
+										{% if get_archive_url %}
+											{% set aurl = get_archive_url(m.media.url) %}
+											{% if aurl %}
+												(<a href="{{ aurl }}" class="archive-link">archive</a>)
+											{% endif %}
+										{% endif %}
 										{% if m.media.description %}
-											<p>{{ m.media.description }}</p>
+											<p>{{ nl2br(m.media.description | escape) | safe | urlize }}</p>
 										{% endif %}
 									{% elif m.media.type == "poll" %}
 										<div class="poll">
