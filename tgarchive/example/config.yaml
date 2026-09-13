@@ -49,6 +49,10 @@ fetch_wait: 5
 # Set to 0 to never stop until all messages have been fetched.
 fetch_limit: 0
 
+# Duration to run in --listen mode before automatically exiting.
+# e.g. "30s", "10m", "2h", "1d", or seconds. If empty/commented out, listen mode runs indefinitely.
+# listen_period: "1h"
+
 publish_dir: "site"
 static_dir: "static"
 per_page: 500

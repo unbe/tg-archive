@@ -1,9 +1,11 @@
 from io import BytesIO
+import asyncio
 import inspect
 from sys import exit
 import json
 import logging
 import os
+import re
 import tempfile
 import shutil
 import time
@@ -13,6 +15,56 @@ from telethon import TelegramClient, errors, events, sync
 import telethon.tl.types
 
 from .db import User, Message, Media
+
+
+def parse_period(s) -> float:
+    """
+    Parse a human-readable period string (e.g. '30s', '10m', '2h', '1d', '2h30m', '3600')
+    into seconds as a float.
+    """
+    if s is None:
+        return None
+    if isinstance(s, (int, float)):
+        return float(s)
+
+    s = str(s).strip()
+    if not s:
+        return None
+
+    if re.match(r"^[+-]?\d+(?:\.\d+)?$", s):
+        return float(s)
+
+    is_negative = False
+    if s.startswith("-"):
+        is_negative = True
+        s = s[1:].strip()
+    elif s.startswith("+"):
+        s = s[1:].strip()
+
+    units = {
+        "s": 1, "sec": 1, "secs": 1, "second": 1, "seconds": 1,
+        "m": 60, "min": 60, "mins": 60, "minute": 60, "minutes": 60,
+        "h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600,
+        "d": 86400, "day": 86400, "days": 86400,
+        "w": 604800, "week": 604800, "weeks": 604800,
+    }
+
+    matches = list(re.finditer(r"(\d+(?:\.\d+)?)\s*([a-zA-Z]+)", s))
+    if not matches:
+        raise ValueError(f"Invalid period format: '{s}'")
+
+    reconstructed = "".join(m.group(0) for m in matches)
+    if re.sub(r"\s+", "", s) != re.sub(r"\s+", "", reconstructed):
+        raise ValueError(f"Invalid period format: '{s}'")
+
+    total = 0.0
+    for m in matches:
+        val = float(m.group(1))
+        unit = m.group(2).lower()
+        if unit not in units:
+            raise ValueError(f"Unknown time unit: '{unit}' in period '{s}'")
+        total += val * units[unit]
+    return -total if is_negative else total
 
 
 class Sync:
@@ -159,13 +211,23 @@ class Sync:
 
     check_deleted = check_updates
 
-    def listen(self):
+    def listen(self, timeout=None):
         """
         Listen for live Telegram events (MessageDeleted, NewMessage, MessageEdited)
         and record them in real-time in the SQLite DB.
+        If timeout (in seconds or human period string like '10m', '2h') is provided,
+        listen mode will exit cleanly after the specified duration.
         """
         group_id = self._get_group_id(self.config["group"])
-        logging.info("listening for live Telegram events on group {}".format(group_id))
+        period = parse_period(timeout) if timeout is not None else None
+        if period is not None and period <= 0:
+            logging.info("listen period is 0 or negative; exiting immediately.")
+            return
+
+        if period is not None:
+            logging.info("listening for live Telegram events on group {} for {}s".format(group_id, period))
+        else:
+            logging.info("listening for live Telegram events on group {}".format(group_id))
 
         @self.client.on(events.MessageDeleted(chats=group_id))
         async def on_message_deleted(event):
@@ -201,7 +263,25 @@ class Sync:
                 self.db.commit()
                 logging.info("live: updated edited message #{}".format(m.id))
 
-        self.client.run_until_disconnected()
+        timer_task = None
+        if period is not None and hasattr(self.client, "loop") and self.client.loop:
+            async def _stop_after_timeout():
+                try:
+                    await asyncio.sleep(period)
+                    logging.info("listen period ({}s) elapsed; stopping listener".format(period))
+                    res = self.client.disconnect()
+                    if inspect.isawaitable(res):
+                        await res
+                except asyncio.CancelledError:
+                    pass
+
+            timer_task = self.client.loop.create_task(_stop_after_timeout())
+
+        try:
+            self.client.run_until_disconnected()
+        finally:
+            if timer_task and not timer_task.done():
+                timer_task.cancel()
 
     def new_client(self, session, config):
         if "proxy" in config and config["proxy"].get("enable"):

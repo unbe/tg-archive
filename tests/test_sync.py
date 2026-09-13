@@ -8,7 +8,7 @@ import pytz
 
 import telethon.tl.types
 from tgarchive.db import DB, User, Message, Media
-from tgarchive.sync import Sync
+from tgarchive.sync import Sync, parse_period
 
 
 class DummyEntity:
@@ -406,6 +406,118 @@ class TestSync(unittest.TestCase):
         # Verify media description updated to new photo ID
         updated_med = self.db.get_media(400)
         self.assertEqual(updated_med.description, "777002")
+
+    def test_parse_period(self):
+        self.assertIsNone(parse_period(None))
+        self.assertIsNone(parse_period(""))
+        self.assertIsNone(parse_period("   "))
+        self.assertEqual(parse_period(120), 120.0)
+        self.assertEqual(parse_period(45.5), 45.5)
+        self.assertEqual(parse_period("3600"), 3600.0)
+        self.assertEqual(parse_period("30s"), 30.0)
+        self.assertEqual(parse_period("10m"), 600.0)
+        self.assertEqual(parse_period("2h"), 7200.0)
+        self.assertEqual(parse_period("1d"), 86400.0)
+        self.assertEqual(parse_period("1w"), 604800.0)
+        self.assertEqual(parse_period("2h30m"), 9000.0)
+        self.assertEqual(parse_period("1.5h"), 5400.0)
+        self.assertEqual(parse_period("2 days 4 hours"), 187200.0)
+
+        with self.assertRaises(ValueError):
+            parse_period("invalid")
+        with self.assertRaises(ValueError):
+            parse_period("10m extra")
+        with self.assertRaises(ValueError):
+            parse_period("10foos")
+
+    @patch("tgarchive.sync.Sync.new_client")
+    def test_listen_with_timeout(self, mock_new_client):
+        import asyncio
+
+        mock_client = MagicMock()
+        mock_new_client.return_value = mock_client
+        mock_client.get_dialogs.return_value = []
+        mock_client.get_entity.return_value = DummyEntity(100)
+
+        loop = asyncio.new_event_loop()
+        mock_client.loop = loop
+        disc = loop.create_future()
+
+        def fake_disconnect():
+            if not disc.done():
+                disc.set_result(None)
+
+        mock_client.disconnect.side_effect = fake_disconnect
+
+        def fake_run_until_disconnected():
+            loop.run_until_complete(disc)
+
+        mock_client.run_until_disconnected.side_effect = fake_run_until_disconnected
+
+        s = Sync(self.config, "session.session", self.db)
+        s.listen(timeout=0.05)
+
+        self.assertTrue(mock_client.disconnect.called)
+        loop.close()
+
+    @patch("tgarchive.sync.Sync.new_client")
+    def test_listen_with_zero_or_negative_timeout(self, mock_new_client):
+        mock_client = MagicMock()
+        mock_new_client.return_value = mock_client
+        mock_client.get_dialogs.return_value = []
+        mock_client.get_entity.return_value = DummyEntity(100)
+
+        s = Sync(self.config, "session.session", self.db)
+        s.listen(timeout=0)
+        self.assertFalse(mock_client.run_until_disconnected.called)
+
+        s.listen(timeout="-10s")
+        self.assertFalse(mock_client.run_until_disconnected.called)
+
+    @patch("tgarchive.get_config")
+    @patch("tgarchive.sync.Sync")
+    @patch("tgarchive.DB")
+    def test_cli_listen_arguments(self, mock_db, mock_sync_cls, mock_get_config):
+        import asyncio
+        import tgarchive
+        mock_get_config.return_value = dict(self.config)
+        mock_sync = MagicMock()
+        mock_sync_cls.return_value = mock_sync
+
+        try:
+            with patch("sys.argv", ["tg-archive", "--listen"]):
+                tgarchive.main()
+                mock_sync.listen.assert_called_with(timeout=None)
+
+            mock_sync.reset_mock()
+            with patch("sys.argv", ["tg-archive", "--listen", "15m"]):
+                tgarchive.main()
+                mock_sync.listen.assert_called_with(timeout="15m")
+
+            mock_sync.reset_mock()
+            with patch("sys.argv", ["tg-archive", "--listen-period", "2h"]):
+                tgarchive.main()
+                mock_sync.listen.assert_called_with(timeout="2h")
+
+            mock_sync.reset_mock()
+            with patch("sys.argv", ["tg-archive", "--listen-timeout", "30s"]):
+                tgarchive.main()
+                mock_sync.listen.assert_called_with(timeout="30s")
+
+            mock_sync.reset_mock()
+            cfg_with_period = dict(self.config)
+            cfg_with_period["listen_period"] = "45m"
+            mock_get_config.return_value = cfg_with_period
+            with patch("sys.argv", ["tg-archive", "--listen"]):
+                tgarchive.main()
+                mock_sync.listen.assert_called_with(timeout="45m")
+        finally:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop and not loop.is_running() and not loop.is_closed():
+                    loop.close()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

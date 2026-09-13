@@ -83,8 +83,10 @@ def main():
                    help="check archived messages in the DB against Telegram to flag deletions and record edits")
     s.add_argument("--recent-days", action="store", type=int, default=None,
                    dest="recent_days", help="limit update/deletion check to messages from the last N days")
-    s.add_argument("--listen", action="store_true", dest="listen",
-                   help="listen for live events (new messages, edits, and deletions) in real time")
+    s.add_argument("--listen", action="store", nargs="?", const="true", default=None, dest="listen",
+                   help="listen for live events (new messages, edits, and deletions) in real time; optionally specify duration, e.g. --listen 10m")
+    s.add_argument("--listen-period", "--listen-timeout", action="store", type=str, default=None,
+                   dest="listen_period", help="exit listen mode after the specified period (e.g. 30s, 10m, 2h, 1d, or seconds)")
 
     b = p.add_argument_group("build")
     b.add_argument("-b", "--build", action="store_true",
@@ -129,7 +131,7 @@ def main():
                 os.chmod(os.path.join(root, f), 0o644)
 
     # Sync from Telegram.
-    elif args.sync or args.check_updates or args.listen:
+    elif args.sync or args.check_updates or args.listen or args.listen_period:
         # Import because the Telegram client import is quite heavy.
         from .sync import Sync
         # patch for python 3.14
@@ -151,7 +153,7 @@ def main():
 
         try:
             s = Sync(cfg, args.session, DB(args.data))
-            if args.sync or (not args.check_updates and not args.listen):
+            if args.sync or (not args.check_updates and not args.listen and not args.listen_period):
                 logging.info("starting Telegram sync (batch_size={}, limit={}, wait={}, mode={})".format(
                     cfg["fetch_batch_size"], cfg["fetch_limit"], cfg["fetch_wait"], mode
                 ))
@@ -160,8 +162,15 @@ def main():
             if args.check_updates:
                 s.check_updates(args.from_id, recent_days=args.recent_days)
 
-            if args.listen:
-                s.listen()
+            if args.listen or args.listen_period:
+                period = args.listen_period or (args.listen if args.listen != "true" else None)
+                if not period:
+                    period = cfg.get("listen_period") or cfg.get("listen_timeout")
+                try:
+                    s.listen(timeout=period)
+                except ValueError as e:
+                    logging.error(f"invalid listen period: {e}")
+                    sys.exit(1)
         except KeyboardInterrupt as e:
             logging.info("sync cancelled manually")
             if cfg.get("use_takeout", False):
