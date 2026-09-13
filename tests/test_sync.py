@@ -1,3 +1,4 @@
+from io import BytesIO
 import os
 import tempfile
 import unittest
@@ -306,6 +307,105 @@ class TestSync(unittest.TestCase):
 
         with open(med_file, "rb") as f:
             self.assertEqual(f.read(), b"new replaced image content")
+
+    @patch("tgarchive.sync.Sync.new_client")
+    def test_listen_with_async_media_and_avatar_download(self, mock_new_client):
+        import asyncio
+        from PIL import Image
+
+        mock_client = MagicMock()
+        mock_new_client.return_value = mock_client
+        mock_client.get_dialogs.return_value = []
+        mock_client.get_entity.return_value = DummyEntity(100)
+
+        handlers = {}
+
+        def fake_on(event_builder):
+            def decorator(func):
+                handlers[type(event_builder)] = func
+                return func
+            return decorator
+
+        mock_client.on.side_effect = fake_on
+
+        # Generate sample JPEG bytes for avatar
+        img = Image.new("RGB", (50, 50), color="red")
+        avatar_buf = BytesIO()
+        img.save(avatar_buf, format="JPEG")
+        avatar_bytes = avatar_buf.getvalue()
+
+        # Mock download_media and download_profile_photo returning coroutines
+        # (reproducing Telethon behavior when loop is running)
+        async def fake_download_media(m, file=None, thumb=None):
+            dl_path = os.path.join(tempfile.gettempdir(), f"live_media_{m.id}_{'thumb' if thumb else 'full'}.jpg")
+            with open(dl_path, "wb") as f:
+                f.write(b"live photo data")
+            return dl_path
+
+        async def fake_download_profile_photo(user, file=None):
+            if file is not None:
+                file.write(avatar_bytes)
+                file.seek(0)
+            return file
+
+        mock_client.download_media.side_effect = fake_download_media
+        mock_client.download_profile_photo.side_effect = fake_download_profile_photo
+
+        config = dict(self.config)
+        config["download_media"] = True
+        config["download_avatars"] = True
+        config["avatar_size"] = [64, 64]
+        os.makedirs(self.media_dir, exist_ok=True)
+
+        s = Sync(config, "session.session", self.db)
+        mock_client.run_until_disconnected.side_effect = lambda: None
+        s.listen()
+
+        # Trigger on_new_message with photo attachment
+        new_handler = handlers[telethon.events.NewMessage]
+        event_new = MagicMock()
+        msg400 = DummyTelethonMessage(400, "Live photo message")
+        photo_mock = MagicMock()
+        photo_mock.id = 777001
+        msg400.media = telethon.tl.types.MessageMediaPhoto(photo=photo_mock)
+        event_new.message = msg400
+
+        asyncio.run(new_handler(event_new))
+
+        # Verify DB insertions
+        msgs = {m.id: m for m in self.db.get_messages(2025, 1)}
+        self.assertIn(400, msgs)
+        self.assertEqual(msgs[400].content, "Live photo message")
+
+        med = self.db.get_media(400)
+        self.assertIsNotNone(med)
+        self.assertEqual(med.url, "400.jpg")
+        self.assertEqual(med.thumb, "thumb_400.jpg")
+        self.assertEqual(med.description, "777001")
+
+        self.assertIsNotNone(msgs[400].user)
+        self.assertEqual(msgs[400].user.avatar, "avatar_1.jpg")
+
+        # Verify disk files
+        self.assertTrue(os.path.exists(os.path.join(self.media_dir, "400.jpg")))
+        self.assertTrue(os.path.exists(os.path.join(self.media_dir, "thumb_400.jpg")))
+        self.assertTrue(os.path.exists(os.path.join(self.media_dir, "avatar_1.jpg")))
+
+        # Trigger on_message_edited with replaced photo (also returning coroutine)
+        edit_handler = handlers[telethon.events.MessageEdited]
+        event_edit = MagicMock()
+        msg400_edited = DummyTelethonMessage(400, "Live edited photo message")
+        msg400_edited.edit_date = pytz.utc.localize(datetime(2025, 1, 15, 15, 0, 0))
+        photo_mock2 = MagicMock()
+        photo_mock2.id = 777002
+        msg400_edited.media = telethon.tl.types.MessageMediaPhoto(photo=photo_mock2)
+        event_edit.message = msg400_edited
+
+        asyncio.run(edit_handler(event_edit))
+
+        # Verify media description updated to new photo ID
+        updated_med = self.db.get_media(400)
+        self.assertEqual(updated_med.description, "777002")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 from io import BytesIO
+import inspect
 from sys import exit
 import json
 import logging
@@ -180,7 +181,7 @@ class Sync:
 
         @self.client.on(events.NewMessage(chats=group_id))
         async def on_new_message(event):
-            m = self._process_telethon_message(event.message)
+            m = await self._process_telethon_message_async(event.message)
             if m:
                 self.db.insert_user(m.user)
                 if m.media:
@@ -191,7 +192,7 @@ class Sync:
 
         @self.client.on(events.MessageEdited(chats=group_id))
         async def on_message_edited(event):
-            m = self._process_telethon_message(event.message, download_avatars=False)
+            m = await self._process_telethon_message_async(event.message, download_avatars=False)
             if m:
                 self.db.insert_user(m.user)
                 if m.media:
@@ -272,49 +273,6 @@ class Sync:
             if parsed:
                 yield parsed
 
-    def _process_telethon_message(self, m, download_avatars=True) -> Message:
-        if not m or isinstance(m, telethon.tl.types.MessageEmpty):
-            return None
-
-        # Media.
-        sticker = None
-        med = None
-        if m.media:
-            # If it's a sticker, get the alt value (unicode emoji).
-            if isinstance(m.media, telethon.tl.types.MessageMediaDocument) and \
-                    hasattr(m.media, "document") and \
-                    m.media.document.mime_type == "application/x-tgsticker":
-                alt = [a.alt for a in m.media.document.attributes if isinstance(
-                    a, telethon.tl.types.DocumentAttributeSticker)]
-                if len(alt) > 0:
-                    sticker = alt[0]
-            elif isinstance(m.media, telethon.tl.types.MessageMediaPoll):
-                med = self._make_poll(m)
-            else:
-                med = self._get_media(m)
-
-        # Message.
-        typ = "message"
-        if m.action:
-            if isinstance(m.action, telethon.tl.types.MessageActionChatAddUser):
-                typ = "user_joined"
-            elif isinstance(m.action, telethon.tl.types.MessageActionChatJoinedByLink):
-                typ = "user_joined_by_link"
-            elif isinstance(m.action, telethon.tl.types.MessageActionChatDeleteUser):
-                typ = "user_left"
-
-        return Message(
-            type=typ,
-            id=m.id,
-            date=m.date,
-            edit_date=m.edit_date,
-            content=sticker if sticker else m.raw_text,
-            reply_to=m.reply_to_msg_id if m.reply_to and m.reply_to.reply_to_msg_id else None,
-            user=self._get_user(m.sender, m.chat, download_avatar=download_avatars),
-            media=med,
-            deleted=False
-        )
-
     def _fetch_messages(self, group, offset_id, ids=None) -> Message:
         try:
             if self.config.get("use_takeout", False):
@@ -331,17 +289,78 @@ class Sync:
             logging.info(
                 "flood waited: have to wait {} seconds".format(e.seconds))
 
-    def _get_user(self, u, chat, download_avatar=True) -> User:
+    def _extract_sticker(self, m):
+        if m.media:
+            if isinstance(m.media, telethon.tl.types.MessageMediaDocument) and \
+                    hasattr(m.media, "document") and \
+                    m.media.document.mime_type == "application/x-tgsticker":
+                alt = [a.alt for a in m.media.document.attributes if isinstance(
+                    a, telethon.tl.types.DocumentAttributeSticker)]
+                if len(alt) > 0:
+                    return alt[0]
+        return None
+
+    def _build_message(self, m, sticker, user, med):
+        typ = "message"
+        if m.action:
+            if isinstance(m.action, telethon.tl.types.MessageActionChatAddUser):
+                typ = "user_joined"
+            elif isinstance(m.action, telethon.tl.types.MessageActionChatJoinedByLink):
+                typ = "user_joined_by_link"
+            elif isinstance(m.action, telethon.tl.types.MessageActionChatDeleteUser):
+                typ = "user_left"
+
+        return Message(
+            type=typ,
+            id=m.id,
+            date=m.date,
+            edit_date=m.edit_date,
+            content=sticker if sticker else m.raw_text,
+            reply_to=m.reply_to_msg_id if m.reply_to and m.reply_to.reply_to_msg_id else None,
+            user=user,
+            media=med,
+            deleted=False
+        )
+
+    def _process_telethon_message(self, m, download_avatars=True) -> Message:
+        if not m or isinstance(m, telethon.tl.types.MessageEmpty):
+            return None
+
+        sticker = self._extract_sticker(m)
+        med = None
+        if m.media and not sticker:
+            if isinstance(m.media, telethon.tl.types.MessageMediaPoll):
+                med = self._make_poll(m)
+            else:
+                med = self._get_media(m)
+
+        user = self._get_user(m.sender, m.chat, download_avatar=download_avatars)
+        return self._build_message(m, sticker, user, med)
+
+    async def _process_telethon_message_async(self, m, download_avatars=True) -> Message:
+        if not m or isinstance(m, telethon.tl.types.MessageEmpty):
+            return None
+
+        sticker = self._extract_sticker(m)
+        med = None
+        if m.media and not sticker:
+            if isinstance(m.media, telethon.tl.types.MessageMediaPoll):
+                med = self._make_poll(m)
+            else:
+                med = await self._get_media_async(m)
+
+        user = await self._get_user_async(m.sender, m.chat, download_avatar=download_avatars)
+        return self._build_message(m, sticker, user, med)
+
+    def _build_user(self, u, chat, avatar):
         tags = []
 
-        # if user info is empty, check for message from group
         if (
             u is None and
             chat is not None and
             chat.title != ''
             ):
                 tags.append("group_self")
-                avatar = self._downloadAvatarForUserOrChat(chat) if download_avatar else None
                 return User(
                     id=chat.id,
                     username=chat.title,
@@ -373,9 +392,6 @@ class Sync:
         if u.fake:
             tags.append("fake")
 
-        # Download sender's profile photo if it's not already cached.
-        avatar = self._downloadAvatarForUserOrChat(u) if download_avatar else None
-
         return User(
             id=u.id,
             username=u.username if u.username else str(u.id),
@@ -384,6 +400,20 @@ class Sync:
             tags=tags,
             avatar=avatar
         )
+
+    def _get_user(self, u, chat, download_avatar=True) -> User:
+        if isinstance(u, telethon.tl.types.ChannelForbidden):
+            return self._build_user(u, chat, None)
+        target = chat if (u is None and chat is not None and chat.title != '') else u
+        avatar = self._downloadAvatarForUserOrChat(target) if download_avatar else None
+        return self._build_user(u, chat, avatar)
+
+    async def _get_user_async(self, u, chat, download_avatar=True) -> User:
+        if isinstance(u, telethon.tl.types.ChannelForbidden):
+            return self._build_user(u, chat, None)
+        target = chat if (u is None and chat is not None and chat.title != '') else u
+        avatar = await self._downloadAvatarForUserOrChat_async(target) if download_avatar else None
+        return self._build_user(u, chat, avatar)
 
     def _make_poll(self, msg):
         if not msg.media.results or not msg.media.results.results:
@@ -409,97 +439,121 @@ class Sync:
             thumb=None
         )
 
-    def _get_media(self, msg):
+    def _find_cached_media(self, msg):
         if isinstance(msg.media, telethon.tl.types.MessageMediaWebPage) and \
                 not isinstance(msg.media.webpage, telethon.tl.types.WebPageEmpty):
-            return Media(
+            return True, Media(
                 id=msg.id,
                 type="webpage",
                 url=msg.media.webpage.url,
                 title=msg.media.webpage.title,
                 description=msg.media.webpage.description if msg.media.webpage.description else None,
                 thumb=None
-            )
-        elif isinstance(msg.media, telethon.tl.types.MessageMediaPhoto) or \
+            ), None, None
+
+        if not (isinstance(msg.media, telethon.tl.types.MessageMediaPhoto) or \
                 isinstance(msg.media, telethon.tl.types.MessageMediaDocument) or \
-                isinstance(msg.media, telethon.tl.types.MessageMediaContact):
-            if self.config["download_media"]:
-                media_mime_types = self.config.get("media_mime_types", [])
-                if len(media_mime_types) > 0:
-                    if hasattr(msg, "file") and hasattr(msg.file, "mime_type") and msg.file.mime_type:
-                        if msg.file.mime_type not in media_mime_types:
-                            logging.info(
-                                "skipping media #{} / {}".format(msg.file.name, msg.file.mime_type))
-                            return
+                isinstance(msg.media, telethon.tl.types.MessageMediaContact)):
+            return True, None, None, None
 
-                telegram_id = None
-                if isinstance(msg.media, telethon.tl.types.MessageMediaPhoto) and hasattr(msg.media, "photo"):
-                    telegram_id = getattr(msg.media.photo, "id", None)
-                elif isinstance(msg.media, telethon.tl.types.MessageMediaDocument) and hasattr(msg.media, "document"):
-                    telegram_id = getattr(msg.media.document, "id", None)
+        if not self.config["download_media"]:
+            return True, None, None, None
 
-                existing = self.db.get_media(msg.id)
-                if existing and existing.url:
-                    fpath = os.path.join(self.config["media_dir"], existing.url)
-                    if os.path.exists(fpath):
-                        is_same = False
-                        if telegram_id is not None and existing.description == str(telegram_id):
+        media_mime_types = self.config.get("media_mime_types", [])
+        if len(media_mime_types) > 0:
+            if hasattr(msg, "file") and hasattr(msg.file, "mime_type") and msg.file.mime_type:
+                if msg.file.mime_type not in media_mime_types:
+                    logging.info(
+                        "skipping media #{} / {}".format(msg.file.name, msg.file.mime_type))
+                    return True, None, None, None
+
+        telegram_id = None
+        if isinstance(msg.media, telethon.tl.types.MessageMediaPhoto) and hasattr(msg.media, "photo"):
+            telegram_id = getattr(msg.media.photo, "id", None)
+        elif isinstance(msg.media, telethon.tl.types.MessageMediaDocument) and hasattr(msg.media, "document"):
+            telegram_id = getattr(msg.media.document, "id", None)
+
+        existing = self.db.get_media(msg.id)
+        if existing and existing.url:
+            fpath = os.path.join(self.config["media_dir"], existing.url)
+            if os.path.exists(fpath):
+                is_same = False
+                if telegram_id is not None and existing.description == str(telegram_id):
+                    is_same = True
+                elif existing.description is None:
+                    # Legacy record without stored telegram_id: verify by size
+                    if isinstance(msg.media, telethon.tl.types.MessageMediaDocument) and hasattr(msg.media, "document"):
+                        doc_size = getattr(msg.media.document, "size", None)
+                        if doc_size is not None and doc_size == os.path.getsize(fpath):
                             is_same = True
-                        elif existing.description is None:
-                            # Legacy record without stored telegram_id: verify by size
-                            if isinstance(msg.media, telethon.tl.types.MessageMediaDocument) and hasattr(msg.media, "document"):
-                                doc_size = getattr(msg.media.document, "size", None)
-                                if doc_size is not None and doc_size == os.path.getsize(fpath):
-                                    is_same = True
-                            elif isinstance(msg.media, telethon.tl.types.MessageMediaPhoto):
-                                if os.path.getsize(fpath) > 0:
-                                    is_same = True
+                    elif isinstance(msg.media, telethon.tl.types.MessageMediaPhoto):
+                        if os.path.getsize(fpath) > 0:
+                            is_same = True
 
-                        if is_same:
-                            if telegram_id is not None and existing.description != str(telegram_id):
-                                updated = Media(
-                                    id=existing.id,
-                                    type=existing.type,
-                                    url=existing.url,
-                                    title=existing.title,
-                                    description=str(telegram_id),
-                                    thumb=existing.thumb
-                                )
-                                self.db.insert_media(updated)
-                                return updated
-                            return existing
+                if is_same:
+                    if telegram_id is not None and existing.description != str(telegram_id):
+                        updated = Media(
+                            id=existing.id,
+                            type=existing.type,
+                            url=existing.url,
+                            title=existing.title,
+                            description=str(telegram_id),
+                            thumb=existing.thumb
+                        )
+                        self.db.insert_media(updated)
+                        return True, updated, telegram_id, existing
+                    return True, existing, telegram_id, existing
 
-                logging.info("downloading media #{}".format(msg.id))
+        return False, None, telegram_id, existing
+
+    def _finalize_downloaded_media(self, msg, basename, fname, thumb, telegram_id, existing):
+        if not fname:
+            return None
+        if existing and existing.url and existing.url != fname:
+            old_fpath = os.path.join(self.config["media_dir"], existing.url)
+            if os.path.exists(old_fpath):
                 try:
-                    basename, fname, thumb = self._download_media(msg)
-                    if existing and existing.url and existing.url != fname:
-                        old_fpath = os.path.join(self.config["media_dir"], existing.url)
-                        if os.path.exists(old_fpath):
-                            try:
-                                os.remove(old_fpath)
-                            except OSError:
-                                pass
-                    return Media(
-                        id=msg.id,
-                        type="photo",
-                        url=fname,
-                        title=basename,
-                        description=str(telegram_id) if telegram_id is not None else None,
-                        thumb=thumb
-                    )
-                except Exception as e:
-                    logging.error(
-                        "error downloading media: #{}: {}".format(msg.id, e))
+                    os.remove(old_fpath)
+                except OSError:
+                    pass
+        return Media(
+            id=msg.id,
+            type="photo",
+            url=fname,
+            title=basename,
+            description=str(telegram_id) if telegram_id is not None else None,
+            thumb=thumb
+        )
 
-    def _download_media(self, msg) -> [str, str, str]:
-        """
-        Download a media / file attached to a message and return its original
-        filename, sanitized name on disk, and the thumbnail (if any). 
-        """
-        # Download the media to the temp dir and copy it back as
-        # there does not seem to be a way to get the canonical
-        # filename before the download.
-        fpath = self.client.download_media(msg, file=tempfile.gettempdir())
+    def _get_media(self, msg):
+        handled, media, telegram_id, existing = self._find_cached_media(msg)
+        if handled:
+            return media
+
+        logging.info("downloading media #{}".format(msg.id))
+        try:
+            basename, fname, thumb = self._download_media(msg)
+            return self._finalize_downloaded_media(msg, basename, fname, thumb, telegram_id, existing)
+        except Exception as e:
+            logging.error(
+                "error downloading media: #{}: {}".format(msg.id, e))
+
+    async def _get_media_async(self, msg):
+        handled, media, telegram_id, existing = self._find_cached_media(msg)
+        if handled:
+            return media
+
+        logging.info("downloading media #{}".format(msg.id))
+        try:
+            basename, fname, thumb = await self._download_media_async(msg)
+            return self._finalize_downloaded_media(msg, basename, fname, thumb, telegram_id, existing)
+        except Exception as e:
+            logging.error(
+                "error downloading media: #{}: {}".format(msg.id, e))
+
+    def _handle_downloaded_media_files(self, msg, fpath, tpath=None):
+        if not fpath:
+            return None, None, None
         basename = os.path.basename(fpath)
 
         newname = "{}.{}".format(msg.id, self._get_file_ext(basename))
@@ -507,14 +561,43 @@ class Sync:
 
         # If it's a photo, download the thumbnail.
         tname = None
-        if isinstance(msg.media, telethon.tl.types.MessageMediaPhoto):
-            tpath = self.client.download_media(
-                msg, file=tempfile.gettempdir(), thumb=1)
+        if tpath:
             tname = "thumb_{}.{}".format(
                 msg.id, self._get_file_ext(os.path.basename(tpath)))
             shutil.move(tpath, os.path.join(self.config["media_dir"], tname))
 
         return basename, newname, tname
+
+    def _download_media(self, msg) -> [str, str, str]:
+        """
+        Download a media / file attached to a message and return its original
+        filename, sanitized name on disk, and the thumbnail (if any). 
+        """
+        fpath = self.client.download_media(msg, file=tempfile.gettempdir())
+        tpath = None
+        if isinstance(msg.media, telethon.tl.types.MessageMediaPhoto):
+            tpath = self.client.download_media(
+                msg, file=tempfile.gettempdir(), thumb=1)
+
+        return self._handle_downloaded_media_files(msg, fpath, tpath)
+
+    async def _download_media_async(self, msg) -> [str, str, str]:
+        """
+        Download a media / file attached to a message asynchronously and return its original
+        filename, sanitized name on disk, and the thumbnail (if any). 
+        """
+        fpath = self.client.download_media(msg, file=tempfile.gettempdir())
+        if inspect.isawaitable(fpath):
+            fpath = await fpath
+
+        tpath = None
+        if isinstance(msg.media, telethon.tl.types.MessageMediaPhoto):
+            tpath = self.client.download_media(
+                msg, file=tempfile.gettempdir(), thumb=1)
+            if inspect.isawaitable(tpath):
+                tpath = await tpath
+
+        return self._handle_downloaded_media_files(msg, fpath, tpath)
 
     def _get_file_ext(self, f) -> str:
         if "." in f:
@@ -523,6 +606,19 @@ class Sync:
                 return e
 
         return ".file"
+
+    def _save_avatar_file(self, user, profile_photo, b, fpath, fname):
+        if profile_photo is None:
+            logging.info("user has no avatar #{}".format(user.id))
+            if hasattr(self, "no_avatar_users"):
+                self.no_avatar_users.add(user.id)
+            return None
+
+        im = Image.open(b)
+        im.thumbnail(self.config["avatar_size"], Image.LANCZOS)
+        im.save(fpath, "JPEG")
+
+        return fname
 
     def _download_avatar(self, user):
         fname = "avatar_{}.jpg".format(user.id)
@@ -539,17 +635,26 @@ class Sync:
         # Download the file into a container, resize it, and then write to disk.
         b = BytesIO()
         profile_photo = self.client.download_profile_photo(user, file=b)
-        if profile_photo is None:
-            logging.info("user has no avatar #{}".format(user.id))
-            if hasattr(self, "no_avatar_users"):
-                self.no_avatar_users.add(user.id)
+        return self._save_avatar_file(user, profile_photo, b, fpath, fname)
+
+    async def _download_avatar_async(self, user):
+        fname = "avatar_{}.jpg".format(user.id)
+        fpath = os.path.join(self.config["media_dir"], fname)
+
+        if os.path.exists(fpath):
+            return fname
+
+        if hasattr(self, "no_avatar_users") and user.id in self.no_avatar_users:
             return None
 
-        im = Image.open(b)
-        im.thumbnail(self.config["avatar_size"], Image.LANCZOS)
-        im.save(fpath, "JPEG")
+        logging.info("downloading avatar #{}".format(user.id))
 
-        return fname
+        # Download the file into a container, resize it, and then write to disk.
+        b = BytesIO()
+        profile_photo = self.client.download_profile_photo(user, file=b)
+        if inspect.isawaitable(profile_photo):
+            profile_photo = await profile_photo
+        return self._save_avatar_file(user, profile_photo, b, fpath, fname)
 
     def _get_group_id(self, group):
         """
@@ -586,6 +691,17 @@ class Sync:
         if self.config["download_avatars"]:
             try:
                 fname = self._download_avatar(entity)
+                avatar = fname
+            except Exception as e:
+                logging.error(
+                    "error downloading avatar: #{}: {}".format(entity.id, e))
+        return avatar
+
+    async def _downloadAvatarForUserOrChat_async(self, entity):
+        avatar = None
+        if self.config["download_avatars"]:
+            try:
+                fname = await self._download_avatar_async(entity)
                 avatar = fname
             except Exception as e:
                 logging.error(
